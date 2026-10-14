@@ -995,9 +995,38 @@ template <class T>
     return sign * (asym + mfact * s);
 }
 
+// ---- Hurwitz zeta by Hermite's integral (any s != 1, Re a > 0) ------------------------
+//   zeta(s, a) = a^{-s}/2 + a^{1-s}/(s-1) + 2 int_0^inf sin(s atan(t/a)) (a^2+t^2)^{-s/2} / (e^{2 pi t} - 1) dt
+// (DLMF 25.11.29), with sin(s atan(t/a)) (a^2+t^2)^{-s/2} = ((a - it)^{-s} - (a + it)^{-s}) / (2i).
+// No partial sums are formed, so it does not suffer the cancellation that Euler-Maclaurin
+// has for Re s < 0.
+template <class T>
+[[nodiscard]] inline cplx<T> hurwitz_zeta_hermite(const cplx<T>& s, cplx<T> a) {
+    // Bring Re a into (0, 1]: there the terms below are of the size of the result.
+    cplx<T> head{};
+    while (!(a.real() > T())) {
+        if (a == cplx<T>()) return {std::numeric_limits<T>::infinity(), T()};
+        head += std::exp(-s * std::log(a));
+        a += T(1);
+    }
+    while (a.real() > T(1)) {
+        a -= T(1);
+        head -= std::exp(-s * std::log(a));
+    }
+    const T twopi = T(2) * pi<T>;
+    const cplx<T> I = de_half_infinite<T>([&](T t) -> cplx<T> {
+        const cplx<T> lm = std::log(cplx<T>(a.real(), a.imag() - t));
+        const cplx<T> lp = std::log(cplx<T>(a.real(), a.imag() + t));
+        const cplx<T> diff = std::exp(-s * lm) - std::exp(-s * lp);
+        return mul_mi(diff) / std::expm1(twopi * t);
+    });
+    const cplx<T> la = std::log(a);
+    return head + std::exp(-s * la) / T(2) + cdiv(std::exp((T(1) - s) * la), s - T(1)) + I;
+}
+
 // ---- Hurwitz zeta (complex s, complex a) by Euler-Maclaurin -------------------------------
 template <class T>
-[[nodiscard]] inline cplx<T> hurwitz_zeta_k(const cplx<T>& s, const cplx<T>& a) {
+[[nodiscard]] inline cplx<T> hurwitz_zeta_em(const cplx<T>& s, const cplx<T>& a) {
     if (!is_finite(s) || !is_finite(a)) return {nan<T>(), nan<T>()};
     if (s == cplx<T>(T(1))) return {std::numeric_limits<T>::infinity(), T()};
     const int M = stirling_terms;
@@ -1024,6 +1053,51 @@ template <class T>
         fact *= T(2 * j + 1) * T(2 * j + 2);
     }
     return sum + tail;
+}
+
+// ---- Hurwitz zeta by Hurwitz's formula (real a, Re s <= -2) -------------------------------
+//   zeta(s, a) = Gamma(t)/(2 pi)^t [e^{i pi t/2} sum e^{-2 pi i n a} n^{-t} + e^{-i pi t/2} sum e^{2 pi i n a} n^{-t}],
+// t = 1 - s, 0 < a <= 1 (DLMF 25.11.9).  The two terms do not cancel, so this stays accurate
+// for large |Im s| where Hermite's integral cancels.  The sums converge like n^{-Re t}.
+template <class T>
+[[nodiscard]] inline cplx<T> hurwitz_zeta_reflect(const cplx<T>& s, T a) {
+    cplx<T> head{};
+    while (!(a > T())) {
+        head += std::exp(-s * std::log(cplx<T>(a)));
+        a += T(1);
+    }
+    while (a > T(1)) {
+        a -= T(1);
+        head -= std::exp(-s * std::log(cplx<T>(a)));
+    }
+    const cplx<T> t = T(1) - s;
+    cplx<T> sp{}, sm{};  // sum e^{+2 pi i n a} n^{-t}, sum e^{-2 pi i n a} n^{-t}
+    const T stop = eps<T>() / T(16);
+    for (long n = 1; n < 100000000; ++n) {
+        const T ln = std::log(T(n));
+        const cplx<T> nt = std::exp(-t * ln);
+        const T x = T(2) * T(n) * a;  // phase / pi, reduced exactly-ish via sinpi/cospi
+        const T fr = x - T(2) * std::floor(x / T(2));
+        const cplx<T> e = expi_pi(fr);
+        sp += e * nt;
+        sm += std::conj(e) * nt;
+        if (std::exp(-t.real() * ln) <= stop * std::max(std::abs(sp), std::abs(sm)) && n > 8) break;
+    }
+    const cplx<T> lg = lgamma(t) - t * std::log(T(2) * pi<T>);
+    const cplx<T> ip(T(), pi<T> / T(2));
+    return head + std::exp(lg + ip * t) * sm + std::exp(lg - ip * t) * sp;
+}
+
+template <class T>
+[[nodiscard]] inline cplx<T> hurwitz_zeta_k(const cplx<T>& s, const cplx<T>& a) {
+    if (!is_finite(s) || !is_finite(a)) return {nan<T>(), nan<T>()};
+    if (s == cplx<T>(T(1))) return {std::numeric_limits<T>::infinity(), T()};
+    // Euler-Maclaurin for Re s >= 0; for Re s < 0 its partial sums cancel, so use Hermite's
+    // integral for |Im s| <= 8 and Hurwitz's formula (real a, Re s <= -2) beyond that.
+    if (s.real() >= T()) return hurwitz_zeta_em(s, a);
+    if (std::abs(s.imag()) <= T(8)) return hurwitz_zeta_hermite(s, a);
+    if (s.real() <= T(-2) && a.imag() == T()) return hurwitz_zeta_reflect(s, a.real());
+    return hurwitz_zeta_em(s, a);
 }
 
 // ---- polylogarithm Li_s(z), real s ----------------------------------------------------------
@@ -1129,6 +1203,31 @@ template <class T>
     return polylog_logseries(s, z);
 }
 
+// 1/e as hi + lo (each rounded to T), for evaluating z + 1/e near the Lambert W branch point.
+template <class T>
+[[nodiscard]] inline T inv_e_hi() noexcept {
+    if constexpr (std::numeric_limits<T>::digits <= 53) return static_cast<T>(0x1.78b56362cef38p-2);
+    else return static_cast<T>(0xbc5ab1b16779be35p-65L);
+}
+template <class T>
+[[nodiscard]] inline T inv_e_lo() noexcept {
+    if constexpr (std::numeric_limits<T>::digits <= 53) return static_cast<T>(-0x1.ca8a4270fadf5p-57);
+    else return static_cast<T>(0xeb7b1e0a4153e437p-130L);
+}
+// g(d) = (d - 1) e^d + 1 = sum_{n>=2} (n-1) d^n / n!, accurate for small d.
+template <class T>
+[[nodiscard]] inline cplx<T> lambert_g(const cplx<T>& d) {
+    if (std::abs(d) > T(0.5)) return (d - T(1)) * std::exp(d) + T(1);
+    cplx<T> term = d * d / T(2), sum = term;  // n = 2: (n-1)/n! = 1/2
+    for (int n = 3; n < 60; ++n) {
+        term *= d / T(n);  // d^n / n!
+        const cplx<T> t = term * T(n - 1);
+        sum += t;
+        if (std::abs(t) <= eps<T>() * std::abs(sum) / 8) break;
+    }
+    return sum;
+}
+
 // ---- Lambert W ------------------------------------------------------------------------------
 template <class T>
 [[nodiscard]] inline cplx<T> lambert_w_k(int k, const cplx<T>& z) {
@@ -1140,18 +1239,15 @@ template <class T>
     const T e1 = std::exp(T(-1));
     const bool real_axis = z.imag() == T();
     cplx<T> w;
-    // distance from the branch point -1/e, with -1/e in two pieces to avoid cancellation
-    constexpr long double e1l = 0.367879441171442321595523770161460867L;
-    const T e1_lo = static_cast<T>(e1l - static_cast<long double>(static_cast<T>(e1l)));
-    const cplx<T> zb = (z + static_cast<T>(e1l)) + e1_lo;
+    // Distance from the branch point, z + 1/e, with 1/e split into hi + lo so the sum is
+    // exact up to one final rounding (z + hi is exact near -1/e by Sterbenz's lemma).
+    const cplx<T> zb = (z + inv_e_hi<T>()) + inv_e_lo<T>();
     const bool near_bp = std::abs(zb) < T(0.25) || (real_axis && z.real() < -e1 && z.real() > T(-1));
     // p = sqrt(2(e z + 1)); W = -1 + p - p^2/3 + 11 p^3/72 - ... on the branch selected by p's sign.
     auto bp_series = [&](cplx<T> p) {
         return T(-1) + p - p * p / T(3) + T(11) / T(72) * p * p * p - T(43) / T(540) * p * p * p * p;
     };
     const cplx<T> p = std::sqrt(T(2) * std::exp(T(1)) * zb);
-    if (std::abs(p) < T(2e-4) && (k == 0 || (k == -1 && !on_lower_side(z)) || (k == 1 && on_lower_side(z))))
-        return bp_series(k == 0 ? p : -p);  // series error O(p^5)
     if (near_bp && k == 0) {
         w = bp_series(p);
     } else if (near_bp && k == -1 && !on_lower_side(z)) {
@@ -1183,6 +1279,21 @@ template <class T>
         if (!is_finite(dw)) break;  // at the branch point w = -1 exactly
         w -= dw;
         if (!(std::abs(dw) > T(4) * eps<T>() * std::abs(w))) break;
+    }
+    // Near the branch point w e^w - z cancels badly.  Refine d = w + 1 by Newton on the
+    // well-conditioned residual  e^{-1} g(d) - (z + 1/e),  g(d) = (d-1) e^d + 1.
+    cplx<T> d = w + T(1);
+    if (is_finite(d) && std::abs(d) < T(0.5)) {
+        for (int it = 0; it < 8; ++it) {
+            const cplx<T> r = lambert_g(d) * inv_e_hi<T>() + lambert_g(d) * inv_e_lo<T>() - zb;
+            const cplx<T> der = std::exp(d) * d * e1;  // d/dd [e^{-1} g(d)] = e^{d-1} d
+            if (der == cplx<T>()) break;
+            const cplx<T> step = cdiv(r, der);
+            if (!is_finite(step)) break;
+            d -= step;
+            if (!(std::abs(step) > eps<T>() * std::abs(d))) break;
+        }
+        w = d - T(1);
     }
     return w;
 }
