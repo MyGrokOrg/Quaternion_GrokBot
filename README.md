@@ -3,7 +3,7 @@
 Header-only **C++23 quaternions** (`a + bi + cj + dk`) whose API follows `std::complex`.
 
 ```cpp
-#include <quaternion.hpp>          // or <quaternion/quaternion.hpp>
+#include <quaternion.hpp>          // everything; or <quaternion/quaternion.hpp> for the core only
 using namespace quat::literals;
 
 quat::quaternion<double> p = 1.0 + 2.0_i + 3.0_j + 4.0_k;
@@ -102,6 +102,46 @@ Write `q = a + u·θ`, where `u` is the unit vector of `q` and θ = ‖v‖. Eve
 | `sin cos tan` | `sin(q) = sin a cosh θ + u cos a sinh θ`, and so on. `tan = sin·cos⁻¹`. |
 | `sinh cosh tanh` | `sinh(q) = sinh a cos θ + u cosh a sin θ`, and so on. |
 
+### Special functions (`<quaternion/special_functions.hpp>`, included by `<quaternion.hpp>`)
+
+Each function extends an analytic function `f` by **axis reduction**. Write `q = a + |v|·u`, where `u` is the unit vector part. Then
+
+    f(q) = Re f(a + i|v|) + u · Im f(a + i|v|)
+
+So `f(q)` lies in the same complex plane as `q` and commutes with it. On the `i` axis it agrees exactly with the complex function. When `f` is real on the real axis, `f(conj q) = conj f(q)`, and a real argument gives a real result.
+
+| Function | Notes |
+|---|---|
+| `asin acos atan asinh acosh atanh` | Use the `std::complex` kernels and branch cuts. |
+| `expm1(q)`, `log1p(q)` | Keep full relative accuracy for small `q`. |
+| `cbrt(q)` | Principal cube root (`cbrt(-8) = 1 + √3 i`), like `std::pow(z, 1/3)`. For real `x ≥ 0` it matches `std::cbrt`. |
+| `tgamma(q)` | Γ. Uses reflection `Γ(z)Γ(1−z) = π/sin πz` for `Re < ½`. Gives ±∞ at 0 and NaN at negative integers, like `<cmath>`. |
+| `lgamma(q)` | log Γ on the analytic-continuation branch (mpmath's `loggamma`). The real part is `log|Γ|`, which equals `std::lgamma` on the real axis. |
+| `digamma(q)` | ψ = Γ′/Γ. Uses the asymptotic series after recurrence, and reflection for `Re < ½`. |
+| `beta(q, b)`, `beta(b, q)` | B(q, b) = Γ(q)Γ(b)/Γ(q+b) for real `b`. Two quaternions on different axes have no well-defined beta. |
+| `erf(q)`, `erfc(q)` | Maclaurin series for `|Re| < ½`. Otherwise the Laplace continued fraction for `erfc` (modified Lentz), with `erfc(−z) = 2 − erfc(z)`. |
+| `riemann_zeta(q)` | ζ. Uses Borwein's η algorithm on `Re ≥ ½`, with the number of terms chosen from the precision and `|Im|`, and the functional equation on `Re < ½`. ζ(1) = ∞, ζ(0) = −½, and the trivial zeros are exact. |
+| `cyl_bessel_j(n, q)` | J_n for integer `n` (an entire function). Uses the power series for `|z| ≤ 1`. Otherwise it uses Miller's backward recurrence, normalized by `1 = J₀ + 2ΣJ₂ₖ` or `cos z = J₀ + 2Σ(−1)ᵏJ₂ₖ`, whichever cancels less. |
+
+**Branch cuts.** The complex kernel is only evaluated on the closed upper half-plane, since `|v| ≥ 0`. On a branch cut along the real axis, the result is the limit from above (imaginary part +0), which is what `std::complex` gives for `(x, +0)`. For example, `asin(2) = π/2 + 1.3169…i`, `lgamma(−2.5) = −0.0562… − 3πi`, and `log1p(−3) = log 2 + πi`. Any imaginary part of a real argument goes on the `i` axis, as with `sqrt` and `log`.
+
+**Accuracy.** The kernels run in at least double precision, so `float` results are close to correctly rounded. Measured against mpmath at 2,800 random points (|Re| ≤ 40, |Im| ≤ 60), the worst relative error was:
+
+| | double | long double (x87) |
+|---|---|---|
+| tgamma, lgamma, digamma | 2e-14 | 1.5e-16 (close to poles) |
+| erf, erfc | 6e-15 | 5e-18 |
+| riemann_zeta | 6e-14 | 3e-17 |
+| cyl_bessel_j | 1.2e-13 (near real zeros) | 2.5e-17 |
+
+Typical errors are a few ulp. Accuracy degrades in these cases:
+
+* Gamma for large `|z|`: the relative error grows like `|lgamma(z)|·ε`.
+* erf/erfc where `|z|²` is large: the error of `exp(−z²)` grows like `|z|²·ε`.
+* ζ for `|Im s|` above a few hundred (the number of terms is capped).
+* lgamma for `Re z < −4000`: it falls back to reflection, so the imaginary part may be off by a multiple of 2π.
+* J_n for `|z|` beyond about 10⁵: the cost grows like `O(|z|)`.
+
 ### Tuple protocol, formatting and literals
 
 * `std::tuple_size<quaternion<T>>` is 4, and `std::tuple_element<I, quaternion<T>>` is `T`. `quat::get<I>(q)` is found by ADL, so structured bindings work, and so does `using std::get; get<0>(q);`.
@@ -127,6 +167,8 @@ Q v = r * 1.0_i * conj(r);                              // ≈ (0,0,1,0)
 
 * Mixed-precision binary operators such as `quaternion<float> * quaternion<double>` are not provided, which matches `std::complex`. Convert one operand explicitly. The compound assignments do accept other precisions.
 * The standard forbids adding overloads to namespace `std`, so `std::get<I>(q)` written fully qualified does not compile. Use `quat::get`, ADL, or structured bindings.
+* The special functions use a single complex kernel per function. The `std::` special functions that need non-integer orders or several arguments (for example `cyl_bessel_j(ν, x)` with real ν, Legendre polynomials, or elliptic integrals) are not provided.
+* `std::numbers` is not used, because libc++ 19 gives only double-precision constants for `long double`. The library carries its own `long double` constants in `quat::detail`.
 * The transcendental functions are not `constexpr`, because `<cmath>` is not `constexpr` until C++26. All arithmetic, `norm`, `conj`, `inverse`, `dot`, `cross` and integer `pow` are `constexpr`.
 * No special IEEE handling of infinities and NaNs (C99 Annex G style) is done beyond `proj` and `abs`.
 * In a `std::format` spec, the width applies to each component, not to the whole quaternion.

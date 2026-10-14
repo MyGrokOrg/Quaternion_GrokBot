@@ -57,10 +57,10 @@ template <class T> void transcendental() {
     const T big = std::numeric_limits<T>::max() / 4;
     CHECK(std::isfinite(abs(Q(big, big, big, big))));  // no overflow
     CHECK_NEAR(arg(Q(1, 1, 1, 1)), std::atan2(std::sqrt(T(3)), T(1)), rel);
-    CHECK_NEAR(arg(Q(-1)), std::numbers::pi_v<T>, rel);
+    CHECK_NEAR(arg(Q(-1)), quat::detail::pi_v<T>, rel);
     CHECK(arg(Q(1)) == 0);
     // negative reals: log and sqrt pick the i axis like std::complex
-    CHECK_NEAR(log(Q(-1)), Q(0, std::numbers::pi_v<T>), rel);
+    CHECK_NEAR(log(Q(-1)), Q(0, quat::detail::pi_v<T>), rel);
     CHECK_NEAR(sqrt(Q(-4)), Q(0, 2), rel);
     CHECK(sqrt(Q(9)) == Q(3));
     CHECK_NEAR(sqrt(Q(-4, 0, 3, 0)), Q(std::sqrt(T(0.5)), 0, T(3) / (2 * std::sqrt(T(0.5))), 0), rel);
@@ -88,7 +88,7 @@ TEST(polar_and_proj) { FOR_EACH_TYPE(polar_proj); }
 TEST(rotation_example) {
     // Rotating (1,0,0) by 90 degrees about z gives (0,1,0).
     using Q = quaternion<double>;
-    const Q r = quat::polar(1.0, std::numbers::pi / 4, Q(0, 0, 0, 1));
+    const Q r = quat::polar(1.0, quat::detail::pi_v<double> / 4, Q(0, 0, 0, 1));
     const Q v = r * Q(0, 1, 0, 0) * conj(r);
     CHECK_NEAR(v, Q(0, 0, 1, 0), 1e-15);
 }

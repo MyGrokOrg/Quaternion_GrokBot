@@ -24,6 +24,13 @@ int main() {
     Q v = r * 1.0_i * conj(r);
     std::println("rotated = {:.3f}", v);
 
+    // Special functions (axis reduction of the complex functions).
+    std::println("tgamma(p) = {:.6g}", quat::tgamma(p));
+    std::println("erf(p)    = {:.6g}", quat::erf(p));
+    std::println("zeta(p)   = {:.6g}", quat::riemann_zeta(p));
+    std::println("J_2(p)    = {:.6g}", quat::cyl_bessel_j(2, p));
+    std::println("sin(asin(p)) = {:.6f}", sin(quat::asin(p)));
+
     auto [w, x, y, z] = p;  // structured bindings
     std::println("components sum = {}", w + x + y + z);
 }

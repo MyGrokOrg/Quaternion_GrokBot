@@ -11,13 +11,14 @@
 
 namespace qtest {
 inline int failures = 0, checks = 0;
+inline const char* current_type = "";
 struct registry { std::vector<std::pair<std::string, std::function<void()>>> tests; };
 inline registry& reg() { static registry r; return r; }
 struct add { add(const char* n, std::function<void()> f) { reg().tests.emplace_back(n, std::move(f)); } };
 
 inline void check(bool ok, const char* expr, std::source_location l = std::source_location::current()) {
     ++checks;
-    if (!ok) { ++failures; std::fprintf(stderr, "%s:%u: CHECK failed: %s\n", l.file_name(), l.line(), expr); }
+    if (!ok) { ++failures; std::fprintf(stderr, "%s:%u: CHECK failed [%s]: %s\n", l.file_name(), l.line(), current_type, expr); }
 }
 template <class T> T tol() {
     return std::numeric_limits<T>::epsilon() * T(256);
@@ -46,5 +47,6 @@ inline int run() {
 #define CHECK(...) qtest::check(static_cast<bool>(__VA_ARGS__), #__VA_ARGS__)
 #define CHECK_NEAR(a, b, rel) qtest::check(qtest::near((a), (b), (rel)), #a " ~= " #b)
 // Run a templated body for float, double and long double.
-#define FOR_EACH_TYPE(fn) do { fn<float>(); fn<double>(); fn<long double>(); } while (0)
+#define FOR_EACH_TYPE(fn) do { qtest::current_type = "float"; fn<float>(); qtest::current_type = "double"; fn<double>(); \
+    qtest::current_type = "long double"; fn<long double>(); qtest::current_type = ""; } while (0)
 #define TEST_MAIN int main() { return qtest::run(); }

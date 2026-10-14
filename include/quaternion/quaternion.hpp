@@ -13,7 +13,6 @@
 #include <format>
 #include <istream>
 #include <limits>
-#include <numbers>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -31,10 +30,16 @@ template <std::floating_point T>
 class quaternion;
 
 namespace detail {
-template <class>
-inline constexpr bool is_quaternion_v = false;
+// Mathematical constants as long double literals.  (std::numbers is avoided because
+// some standard libraries, e.g. libc++ 19, give only double precision for long double.)
 template <class T>
-inline constexpr bool is_quaternion_v<quaternion<T>> = true;
+inline constexpr T pi_v = static_cast<T>(3.141592653589793238462643383279502884L);
+template <class T>
+inline constexpr T ln2_v = static_cast<T>(0.693147180559945309417232121458176568L);
+template <class T>
+inline constexpr T ln10_v = static_cast<T>(2.302585092994045684017991454684364208L);
+template <class T>
+inline constexpr T egamma_v = static_cast<T>(0.577215664901532860606512090082402431L);
 }  // namespace detail
 
 /// Quaternion number a + bi + cj + dk over the floating-point type T.
@@ -343,7 +348,7 @@ template <class T>
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> log10(const quaternion<T>& q) noexcept {
-    return log(q) / std::numbers::ln10_v<T>;
+    return log(q) / detail::ln10_v<T>;
 }
 /// Principal square root (non-negative real part).
 template <class T>
