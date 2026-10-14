@@ -1129,4 +1129,67 @@ template <class T> void accuracy_limits() {
 
 TEST(accuracy_limits_double_t) { FOR_EACH_TYPE(accuracy_limits); }
 
+namespace {
+// Real-axis references from mpmath in the std:: conventions (tests/gen/gen_realaxis.py),
+// covering the inputs of the std:: special math comparisons.  Unlike those, this runs on
+// every standard library, including libc++, which lacks the C++17 special functions.
+struct rref { std::string_view fn; long double p1, p2, p3, x, want; };
+constexpr rref realaxis_refs[] = {
+#include "realaxis_refs.inc"
+};
+template <class T> void real_axis_mpmath() {
+    using Q = quaternion<T>;
+    const T e = std::numeric_limits<T>::epsilon();
+    double worst = 0;
+    std::string_view worst_fn;
+    for (const auto& r : realaxis_refs) {
+        const T x = static_cast<T>(r.x), p1 = static_cast<T>(r.p1), p2 = static_cast<T>(r.p2);
+        const unsigned u1 = static_cast<unsigned>(r.p1), u2 = static_cast<unsigned>(r.p2);
+        const Q q(x);
+        Q got;
+        T scale = T(0);  // polynomials: absolute error relative to max(1, |want|)
+        const std::string_view f = r.fn;
+        if (f == "cyl_bessel_j") got = quat::cyl_bessel_j(p1, q);
+        else if (f == "cyl_neumann") got = quat::cyl_neumann(p1, q);
+        else if (f == "cyl_bessel_i") got = quat::cyl_bessel_i(p1, q);
+        else if (f == "cyl_bessel_k") got = quat::cyl_bessel_k(p1, q);
+        else if (f == "cyl_bessel_j_int") got = quat::cyl_bessel_j(static_cast<int>(r.p1), q);
+        else if (f == "cyl_bessel_i_int") got = quat::cyl_bessel_i(static_cast<int>(r.p1), q);
+        else if (f == "sph_bessel") got = quat::sph_bessel(u1, q);
+        else if (f == "sph_neumann") got = quat::sph_neumann(u1, q);
+        else if (f == "hermite") got = quat::hermite(u1, q), scale = T(1);
+        else if (f == "laguerre") got = quat::laguerre(u1, q), scale = T(1);
+        else if (f == "assoc_laguerre") got = quat::assoc_laguerre(u1, u2, q), scale = T(1);
+        else if (f == "legendre") got = quat::legendre(u1, q), scale = T(1);
+        else if (f == "assoc_legendre") got = quat::assoc_legendre(u1, u2, q), scale = T(1);
+        else if (f == "sph_legendre") got = quat::sph_legendre(u1, u2, q), scale = T(1);
+        else if (f == "expint") got = quat::expint(q);
+        else if (f == "ellint_1") got = quat::ellint_1(p1, q);
+        else if (f == "ellint_2") got = quat::ellint_2(p1, q);
+        else if (f == "ellint_3") got = quat::ellint_3(p1, q, p2);
+        else if (f == "comp_ellint_1") got = quat::comp_ellint_1(q);
+        else if (f == "comp_ellint_2") got = quat::comp_ellint_2(q);
+        else if (f == "comp_ellint_3") got = quat::comp_ellint_3(p1, q);
+        else if (f == "riemann_zeta") got = quat::riemann_zeta(q);
+        else if (f == "beta") got = quat::beta(q, p1);
+        else { qtest::check(false, "unknown reference function"); continue; }
+        const T want = static_cast<T>(r.want);
+        // oscillatory J/Y: measure against the envelope sqrt(2/(pi x)), since near a zero the
+        // relative error is dominated by the input conditioning |x J'/J|
+        if ((f == "cyl_bessel_j" || f == "cyl_neumann" || f == "cyl_bessel_j_int") && x > T(1))
+            scale = std::sqrt(T(2) / (quat::detail::pi_v<T> * x));
+        const T den = std::max({scale, std::abs(want), std::numeric_limits<T>::min()});
+        const double err = static_cast<double>(abs(got - Q(want)) / den / e);
+        if (err > worst) worst = err, worst_fn = f;
+        if (!(err <= 64)) std::fprintf(stderr, "   %.*s(%g, %g; %g): %.3g eps\n", int(f.size()), f.data(),
+                                        double(r.p1), double(r.p2), double(r.x), err);
+        qtest::check(err <= 64, f.data());
+    }
+    std::printf("  [%s] real axis vs mpmath: %zu refs, worst %.3g eps (%.*s)\n", qtest::current_type,
+                std::size(realaxis_refs), worst, int(worst_fn.size()), worst_fn.data());
+}
+}  // namespace
+
+TEST(real_axis_mpmath_all_libraries) { FOR_EACH_TYPE(real_axis_mpmath); }
+
 TEST_MAIN

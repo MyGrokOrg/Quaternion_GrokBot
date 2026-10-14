@@ -16,12 +16,22 @@ jobs:
           - { name: gcc-14, cxx: g++-14, flags: "" }
           - { name: clang-18-libstdcxx, cxx: clang++-18, flags: "" }
           - { name: clang-18-libcxx, cxx: clang++-18, flags: "-stdlib=libc++" }
+          - { name: clang-19-libstdcxx, cxx: clang++-19, flags: "", llvm: 19 }
+          - { name: clang-19-libcxx, cxx: clang++-19, flags: "-stdlib=libc++", llvm: 19 }
     name: ${{ matrix.compiler.name }} (${{ matrix.build_type }})
     steps:
       - uses: actions/checkout@v5
+      - name: Install clang from apt.llvm.org
+        if: matrix.compiler.llvm
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ matrix.compiler.llvm }}
       - name: Install libc++
         if: contains(matrix.compiler.flags, 'libc++')
-        run: sudo apt-get update && sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+        run: |
+          v=${{ matrix.compiler.llvm || 18 }}
+          sudo apt-get update && sudo apt-get install -y libc++-$v-dev libc++abi-$v-dev
       - name: Configure
         run: cmake -B build -DCMAKE_CXX_COMPILER=${{ matrix.compiler.cxx }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} "-DCMAKE_CXX_FLAGS=${{ matrix.compiler.flags }}"
       - name: Build

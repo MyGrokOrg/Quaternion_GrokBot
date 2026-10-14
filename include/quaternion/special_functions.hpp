@@ -999,7 +999,9 @@ template <class T>
         const T at = std::abs(term);
         sum += term;
         if (at <= eps<T>() / T(4) * std::abs(sum)) {
-            k = std::sqrt(cdiv(pi<T>, T(2) * w)) * std::exp(-w) * sum;
+            // sqrt(pi/2)/sqrt(w), not sqrt(pi/(2w)): the division would flip the sign of a
+            // zero imaginary part and lose the ph w = -pi side used by I_mu.
+            k = cdiv(std::sqrt(pi<T> / T(2)) * std::exp(-w), std::sqrt(w)) * sum;
             return true;
         }
         if (!(at < prev)) return false;
