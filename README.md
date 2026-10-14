@@ -183,11 +183,10 @@ These also use axis reduction. Real parameters such as orders, degrees, moduli a
 * **Elliptic integrals** use Carlson's R_F, R_D and R_J with complex arguments.
 * **E₁** uses the power series or the continued fraction. Si, Ci and Fresnel use the power series for small |z|, and otherwise E₁ or erf.
 * **ψ^(m)** uses recurrence and then the asymptotic series.
-* **Hurwitz ζ**:
-  * Euler–Maclaurin for Re s ≥ 0.
-  * For Re s < 0 its partial sums cancel, so it uses other methods:
-    * Hermite's integral (DLMF 25.11.29) for |Im s| ≤ 8, with `a` first shifted into 0 < Re a ≤ 1.
-    * Hurwitz's Fourier formula (DLMF 25.11.9) for |Im s| > 8 and Re s ≤ −2, which avoids the e^{π|Im s|/2} cancellation of Hermite's integral.
+* **Hurwitz ζ** picks one of three methods:
+  * Hurwitz's Fourier formula (DLMF 25.11.9) for real `a`, Re s ≤ −2 and |Im s| > 8.
+  * Euler–Maclaurin for Re s ≥ ½ and |Im s| ≤ 15.
+  * Hermite's integral (DLMF 25.11.29) everywhere else. Before integrating, `a` is shifted by the recurrence so that Re a ≈ max(1, 1.3·|Im s|/2π). That makes the factor e^{|Im s|·atan(t/a)} small next to e^{−2πt}, so the integral does not cancel. The integrand is formed in logarithmic form so it cannot overflow for large |Im s|.
 * **Li_s** uses the power series, or the expansion in log z, or inversion. The inversion uses Bernoulli polynomials for integer s and Jonquière's formula otherwise.
 * **Lambert W** uses Halley iteration. The start is the branch-point series or the asymptotic expansion.
   * Near −1/e (|W + 1| < ½), the result is refined by Newton iteration on d = W + 1 against the residual e⁻¹g(d) − (z + 1/e), where g(d) = (d − 1)eᵈ + 1 is summed as a series. This form has no cancellation.
@@ -206,7 +205,7 @@ These also use axis reduction. Real parameters such as orders, degrees, moduli a
 | E₁, Ei, Si, Ci | 6e-15 | 5e-18 | ≤ 30 to 40 |
 | Fresnel S, C | 3e-14 | 1e-17 | ≤ 5 |
 | ψ^(m), m ≤ 6 | 1.4e-12 (next to poles) | 8e-18 | ≤ 20 |
-| Hurwitz ζ, −25 ≤ Re s ≤ 6 | 3e-14 (2e-13 next to a zero in `a`; 1.4e-13 for −2 < Re s < 0 with \|Im s\| > 8) | 1.6e-16 | \|Im s\| ≤ 30, 0.05 ≤ a ≤ 5 |
+| Hurwitz ζ, −25 ≤ Re s ≤ 12 | about 50·\|s\|·ε, typically ≤ 10·\|s\|·ε (2e-13 next to a zero in `a`, within that point's conditioning) | same in units of ε | \|Im s\| ≤ 400, 0.05 ≤ a ≤ 5 |
 | Li_s, −3 ≤ s ≤ 6 | 1e-12 | 2e-16 | \|z\| ≤ 6 |
 | Lambert W, branches −3 … 2 | 2e-16 | 1e-19 | \|z\| ≤ 50 |
 | Lambert W next to −1/e (\|z + 1/e\| from 1e-19 to 0.3; branches 0, ±1) | 3 ulp | 3 ulp | |
@@ -216,7 +215,8 @@ These also use axis reduction. Real parameters such as orders, degrees, moduli a
 
 Accuracy degrades in these cases:
 
-* **Hurwitz ζ for −2 < Re s < 0 with |Im s| > 8.** This strip still uses Euler–Maclaurin and is good to about 1e-13. Error relative to |ζ| also grows next to the zeros of ζ(s, ·), which is expected. The internal complex-`a` path (used by Li_s with real s, so Im s = 0) has no accuracy loss. With complex `a` and |Im s| > 8 and Re s < 0, accuracy would degrade, but no public function reaches that case.
+* **Hurwitz ζ conditioning.** The condition number of ζ(s, a) with respect to s grows like |s|·log, so rounding s alone limits the relative accuracy to about |s|·ε. The library stays within a small multiple of that, up to |Im s| = 400 (the largest tested). Near a zero of ζ(s, ·), the condition number with respect to `a` is |a·s·ζ(s+1, a)/ζ(s, a)|, which can reach 10³–10⁴. That is why the error there can reach about 2e-13; these cases are input conditioning, not algorithm error.
+* **Complex `a` (internal).** Li_s calls ζ(1−s, a) with complex `a`, which is accurate there because Im s = 0. With complex `a`, Re s < −6 and |Im s| > 8, Hermite's integral cancels by up to about 10³·|s|·ε. With complex `a`, Re s > 3 and small |Im s|, neither method is reliable. No public function reaches either case.
 * **Bessel functions.** The quadrature behind K_ν is adaptive, and the J/I continued fractions need O(|z|) terms, so large |z| or |ν| is slow but still accurate.
 * **Lambert W at −1/e.** W is computed to a few ulp of the exact value for the given floating-point input. Because W ≈ −1 + √(2e(z + 1/e)), an input rounding error δ moves the true W by about √(2e)·δ/(2√|z + 1/e|). That error comes from the input, not from this library. Also, a quaternion argument q = a + |v|u can only reach one side of the cut along (−∞, −1/e], namely the |v| ≥ 0 side. So branches k and −k are related by conjugation when the axis is reversed.
 * **Γ(a, z) for a within 1e-3 of a negative integer** near the negative real axis. It uses the recurrence, with some cancellation.

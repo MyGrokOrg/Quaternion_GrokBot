@@ -1002,23 +1002,34 @@ template <class T>
 // has for Re s < 0.
 template <class T>
 [[nodiscard]] inline cplx<T> hurwitz_zeta_hermite(const cplx<T>& s, cplx<T> a) {
-    // Bring Re a into (0, 1]: there the terms below are of the size of the result.
+    // Bring Re a into (lo - 1, lo]: for small |Im s| (lo = 1) the terms below are then of
+    // the size of the result.
     cplx<T> head{};
     while (!(a.real() > T())) {
         if (a == cplx<T>()) return {std::numeric_limits<T>::infinity(), T()};
         head += std::exp(-s * std::log(a));
         a += T(1);
     }
-    while (a.real() > T(1)) {
+    // For |Im s| large the integrand grows like e^{|Im s| atan(t/a)}; with
+    // Re a >= 1.3 |Im s|/(2 pi) that growth is dominated by e^{-2 pi t}, so shift a up to there.
+    const T lo = std::max(T(1), std::ceil(T(1.3) * std::abs(s.imag()) / (T(2) * pi<T>)));
+    while (a.real() > lo) {
         a -= T(1);
         head -= std::exp(-s * std::log(a));
+    }
+    while (a.real() <= lo - T(1)) {
+        head += std::exp(-s * std::log(a));
+        a += T(1);
     }
     const T twopi = T(2) * pi<T>;
     const cplx<T> I = de_half_infinite<T>([&](T t) -> cplx<T> {
         const cplx<T> lm = std::log(cplx<T>(a.real(), a.imag() - t));
         const cplx<T> lp = std::log(cplx<T>(a.real(), a.imag() + t));
-        const cplx<T> diff = std::exp(-s * lm) - std::exp(-s * lp);
-        return mul_mi(diff) / std::expm1(twopi * t);
+        if (t <= T(1)) return mul_mi(std::exp(-s * lm) - std::exp(-s * lp)) / std::expm1(twopi * t);
+        // for larger t divide by e^{2 pi t} - 1 inside the exponentials, so that the
+        // factors e^{|Im s| atan(t/a)} cannot overflow
+        const T ld = twopi * t + std::log1p(-std::exp(-twopi * t));
+        return mul_mi(std::exp(-s * lm - ld) - std::exp(-s * lp - ld));
     });
     const cplx<T> la = std::log(a);
     return head + std::exp(-s * la) / T(2) + cdiv(std::exp((T(1) - s) * la), s - T(1)) + I;
@@ -1092,12 +1103,15 @@ template <class T>
 [[nodiscard]] inline cplx<T> hurwitz_zeta_k(const cplx<T>& s, const cplx<T>& a) {
     if (!is_finite(s) || !is_finite(a)) return {nan<T>(), nan<T>()};
     if (s == cplx<T>(T(1))) return {std::numeric_limits<T>::infinity(), T()};
-    // Euler-Maclaurin for Re s >= 0; for Re s < 0 its partial sums cancel, so use Hermite's
-    // integral for |Im s| <= 8 and Hurwitz's formula (real a, Re s <= -2) beyond that.
-    if (s.real() >= T()) return hurwitz_zeta_em(s, a);
-    if (std::abs(s.imag()) <= T(8)) return hurwitz_zeta_hermite(s, a);
-    if (s.real() <= T(-2) && a.imag() == T()) return hurwitz_zeta_reflect(s, a.real());
-    return hurwitz_zeta_em(s, a);
+    // Euler-Maclaurin's partial sums cancel for Re s < 1/2, and its fixed number of Bernoulli
+    // terms limits it for large |Im s|.  Hurwitz's formula covers real a with Re s <= -2 and
+    // |Im s| > 8.  Hermite's integral (with a shifted so the integrand does not grow with
+    // |Im s|) covers the rest; it cancels only for Re s > 1/2 with small |Im s|, where
+    // Euler-Maclaurin is used instead.
+    const T ai = std::abs(s.imag());
+    if (ai > T(8) && s.real() <= T(-2) && a.imag() == T()) return hurwitz_zeta_reflect(s, a.real());
+    if (s.real() >= T(0.5) && ai <= (a.imag() == T() ? T(15) : T(4))) return hurwitz_zeta_em(s, a);
+    return hurwitz_zeta_hermite(s, a);
 }
 
 // ---- polylogarithm Li_s(z), real s ----------------------------------------------------------
