@@ -1713,6 +1713,18 @@ template <class T>
 
 // ---- incomplete gamma (real a, complex z) ---------------------------------------------------
 // Returns {P, Q} regularized, for a > 0.
+// exp(a log z + c z) for real a and c = 0 or -1, with the exponent in double-T so that
+// large |a log z| or |z| do not amplify its rounding.
+template <class T>
+[[nodiscard]] inline cplx<T> exp_alogz(T a, const cplx<T>& z, T c) noexcept {
+    const cdd<T> lz = clog_dd(dd<T>{z.real(), T()}, dd<T>{z.imag(), T()});
+    cdd<T> e{lz.re * a, lz.im * a};
+    if (c != T()) {
+        e.re = e.re + z.real() * c;
+        e.im = e.im + z.imag() * c;
+    }
+    return exp_split(e);
+}
 template <class T>
 struct pq { cplx<T> p, q; };
 template <class T>
@@ -1763,12 +1775,16 @@ template <class T>
     return {P, T(1) - P};
 }
 // Gamma(a, z) = z^a e^{-z} / (z + 1 - a - 1(1-a)/(z + 3 - a - ...)), |ph z| < pi, any real a.
+// The modified Lentz algorithm finds the number of terms N; the fraction is then
+// re-evaluated backwards from term N + N/4 + 8, which does not accumulate the forward
+// rounding of the Lentz product (several tens of ulp near the negative real axis).
 template <class T>
 [[nodiscard]] inline cplx<T> gamma_cf(T a, const cplx<T>& z) {
     const T tiny = std::numeric_limits<T>::min() * T(1e10);
     cplx<T> b = z + T(1) - a, c = T(1) / tiny, d = cdiv(T(1), b), h = d;
-    for (int i = 1; i < 1000000; ++i) {
-        const T an = -T(i) * (T(i) - a);
+    int n = 1;
+    for (; n < 1000000; ++n) {
+        const T an = -T(n) * (T(n) - a);
         b += T(2);
         d = an * d + b;
         if (std::abs(d) < tiny) d = tiny;
@@ -1779,7 +1795,14 @@ template <class T>
         h *= del;
         if (std::abs(del - T(1)) <= eps<T>()) break;
     }
-    return std::exp(a * std::log(z) - z) * h;
+    const int m = n + n / 4 + 8;
+    const cplx<T> b0 = z + T(1) - a;
+    cplx<T> t = b0 + T(2 * m);
+    for (int i = m; i >= 1; --i) {
+        const T an = -T(i) * (T(i) - a);
+        t = b0 + T(2 * (i - 1)) + cdiv(cplx<T>(an), t);
+    }
+    return cdiv(exp_alogz(a, z, T(-1)), t);
 }
 // Upper incomplete gamma Gamma(a, z) for any real a (z != 0).
 template <class T>
@@ -1789,12 +1812,60 @@ template <class T>
         if (a > T()) return {std::tgamma(a), T()};
         return {std::numeric_limits<T>::infinity(), T()};
     }
-    // Small positive a joins the near-pole path below (Q(a, z) Gamma(a) cancels there).
-    if (a > T(0.5)) return gamma_pq(a, z).q * std::tgamma(a);
+    const T az = std::abs(z);
+    // The (backward-evaluated) continued fraction is accurate up to about 3 degrees from
+    // the negative real axis, i.e. 1 + cos(arg z) > 0.004.  Closer than that, and for
+    // |z| <= 2, the alternating power series is used; it cancels only by about
+    // e^{|z| + Re z} = e^{0.004 |z|} there.
+    // For 0.8 < |z| <= 2 it is also accurate as long as arg z <= 0.6 pi.
+    const bool cf_sector = (az > T(2) && az + z.real() > T(0.004) * az) ||
+                           (az > T(0.8) && z.real() >= T(-0.3) * az);
+    if (a > T(0.5)) {
+        if (cf_sector && az >= a + T(1)) return gamma_cf(a, z);
+        // Two power series for gamma(a, z), Gamma(a, z) = Gamma(a) - gamma(a, z):
+        //   Kummer:      z^a e^{-z} sum z^k / (a (a+1) ... (a+k))
+        //   alternating: z^a        sum (-z)^k / (k! (a+k))
+        // Each is accepted if its estimated relative error, (largest term / |sum|)
+        // |gamma| + Gamma(a), over |Gamma(a, z)|, is at most 16 (in units of eps).  The
+        // Kummer form suits Re z >= 0 or |z| < a, the alternating one Re z < 0.
+        const T ga = std::tgamma(a);
+        cplx<T> best;
+        T best_err = std::numeric_limits<T>::infinity();
+        auto consider = [&](const cplx<T>& g, T ratio) {
+            const cplx<T> res = ga - g;
+            const T err = (ratio * std::abs(g) + ga) / std::abs(res);
+            if (!(err >= best_err)) best = res, best_err = err;
+        };
+        {
+            cplx<T> term(T(1) / a), sum = term;
+            T mx = std::abs(term);
+            for (int k = 1; k < 1000000; ++k) {
+                term *= z / (a + T(k));
+                sum += term;
+                mx = std::max(mx, std::abs(term));
+                if (std::abs(term) <= eps<T>() * std::abs(sum) / 4) break;
+            }
+            consider(exp_alogz(a, z, T(-1)) * sum, mx / std::abs(sum));
+        }
+        if (best_err <= T(16)) return best;
+        {
+            cplx<T> term(T(1)), sum(T(1) / a);
+            T mx = std::abs(sum);
+            for (int k = 1; k < 1000000; ++k) {
+                term *= -z / T(k);
+                const cplx<T> t = term / (a + T(k));
+                sum += t;
+                mx = std::max(mx, std::abs(t));
+                if (T(k) > az && std::abs(t) <= eps<T>() * std::abs(sum) / 4) break;
+            }
+            consider(exp_alogz(a, z, T()) * sum, mx / std::abs(sum));
+        }
+        // The fraction becomes ill-conditioned for |z| well below a; keep the series there.
+        if (best_err <= T(16) || !cf_sector || az < T(0.5) * a) return best;
+        return gamma_cf(a, z);
+    }
     {
-        if (const T az = std::abs(z), ag = std::abs(std::arg(z));
-            (az > T(2) && ag < T(0.75) * pi<T>) || (az > T(10) && ag < T(0.9) * pi<T>))
-            return gamma_cf(a, z);
+        if (cf_sector) return gamma_cf(a, z);
         // Series Gamma(a, z) = Gamma(a) - z^a sum_k (-z)^k / (k! (a+k)), written around the
         // nearest pole a = -n + delta (|delta| <= 1/2).  Gamma(a) and the k = n term
         // both have a pole at delta = 0; combined analytically,
@@ -1854,7 +1925,7 @@ template <class T>
             sum += t;
             if (T(k) > r && k > n && std::abs(t) <= eps<T>() * std::abs(sum) / 4) break;
         }
-        return head - std::exp(a * lz) * sum;
+        return head - exp_alogz(a, z, T()) * sum;
     }
 }
 template <class T>

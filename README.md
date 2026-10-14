@@ -219,8 +219,8 @@ These also use axis reduction. Real parameters such as orders, degrees, moduli a
 | Lambert W, branches −3 … 2 | 2e-16 | 1e-19 | \|z\| ≤ 50 |
 | Lambert W next to −1/e (\|z + 1/e\| from 1e-19 to 0.3; branches 0, ±1) | 3 ulp | 3 ulp | |
 | Li_s, non-integer 3 < s ≤ 25, e^5.5 < \|z\| < e^40 | 3e-14 | 1.2e-17 | |
-| Γ(a, z), γ(a, z), −4 ≤ a ≤ 8 | 8e-13 | 7e-17 | ≤ 20 |
-| Γ(a, z), a within 0.5 of 0, −1, …, −7 (including the integers), all arg z | 2e-14 | 1.2e-17 | \|z\| ≤ 30 |
+| γ(a, z), −4 ≤ a ≤ 8 | 8e-13 | 7e-17 | ≤ 20 |
+| Γ(a, z), −8 ≤ a ≤ 20, all arg z (including the negative real axis and a at or near 0, −1, …) | 18 ulp (up to 43 where the input conditioning \|z^a e^{−z}/Γ(a, z)\| is 16–200) | 21 ulp | \|z\| ≤ 100 |
 | I_x(a, b), 0.2 ≤ a, b ≤ 6 | 6e-15 | 2e-18 | \|x\| ≤ 1.5 |
 
 Accuracy degrades in these cases:
@@ -229,7 +229,10 @@ Accuracy degrades in these cases:
 * **Complex `a` (internal).** Li_s calls ζ(1−s, a) with complex `a`, which is accurate there because Im s = 0. With complex `a`, Re s < −6 and |Im s| > 8, Hermite's integral cancels by up to about 10³·|s|·ε. With complex `a`, Re s > 3 and small |Im s|, neither method is reliable. No public function reaches either case.
 * **Bessel functions.** The quadrature behind K_ν is adaptive, and the J/I continued fractions need O(|z|) terms, so large |z| or |ν| is slow but still accurate.
 * **Lambert W at −1/e.** W is computed to a few ulp of the exact value for the given floating-point input. Because W ≈ −1 + √(2e(z + 1/e)), an input rounding error δ moves the true W by about √(2e)·δ/(2√|z + 1/e|). That error comes from the input, not from this library. Also, a quaternion argument q = a + |v|u can only reach one side of the cut along (−∞, −1/e], namely the |v| ≥ 0 side. So branches k and −k are related by conjugation when the axis is reversed.
-* **Γ(a, z) for a ≤ ½.** Outside the continued-fraction sector, the power series is used around the nearest pole a = −n + δ. The pole of Γ(a) and the k = n series term are combined analytically as `(−1)ⁿ/n!·[expm1(log Γ(1+δ) − Σ log1p(−δ/m)) − expm1(δ log z)]/δ`, so there is no cancellation at a = −n ± small, or at the integers. (The old downward recurrence lost up to |z|ⁿ.) For ½ < a < 1 next to the negative real axis, `Q(a, z)·Γ(a)` still loses up to about 500 ulp.
+* **Γ(a, z).** The Legendre continued fraction is evaluated backwards, from a term count that the modified Lentz algorithm finds first. The forward Lentz product accumulated tens of ulp. The factor z^a e^{−z} is formed with a double-length exponent. The fraction is used unless z is within about 3° of the negative real axis (1 + cos arg z ≤ 0.004), or |z| ≤ 2 (|z| ≤ 0.8 for arg z ≤ 0.6π). Elsewhere a power series is used:
+  * For a ≤ ½, the series is taken around the nearest pole a = −n + δ. The pole of Γ(a) and the k = n term are combined analytically as `(−1)ⁿ/n!·[expm1(log Γ(1+δ) − Σ log1p(−δ/m)) − expm1(δ log z)]/δ`, so nothing cancels at or near the non-positive integers.
+  * For a > ½, both the Kummer series and the alternating series are evaluated, and the one with the smaller estimated rounding error is kept. If both exceed 16 ε and the fraction is reliable (|z| ≥ a/2), the fraction is used instead.
+  * The remaining errors stay within the input conditioning |z^a e^{−z}/Γ(a, z)|.
 
 **Not provided.** Elliptic integrals with two quaternion parameters and Hurwitz ζ with a quaternion `a` are not provided, since axis reduction needs a single quaternion argument.
 
