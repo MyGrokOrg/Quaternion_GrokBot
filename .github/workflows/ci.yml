@@ -12,10 +12,18 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [Debug, Release]
+        compiler:
+          - { name: gcc-14, cxx: g++-14, flags: "" }
+          - { name: clang-18-libstdcxx, cxx: clang++-18, flags: "" }
+          - { name: clang-18-libcxx, cxx: clang++-18, flags: "-stdlib=libc++" }
+    name: ${{ matrix.compiler.name }} (${{ matrix.build_type }})
     steps:
       - uses: actions/checkout@v5
+      - name: Install libc++
+        if: contains(matrix.compiler.flags, 'libc++')
+        run: sudo apt-get update && sudo apt-get install -y libc++-18-dev libc++abi-18-dev
       - name: Configure
-        run: cmake -B build -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        run: cmake -B build -DCMAKE_CXX_COMPILER=${{ matrix.compiler.cxx }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} "-DCMAKE_CXX_FLAGS=${{ matrix.compiler.flags }}"
       - name: Build
         run: cmake --build build -j
       - name: Test

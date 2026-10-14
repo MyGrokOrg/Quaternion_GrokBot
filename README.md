@@ -11,13 +11,13 @@ auto q = quat::quaternion(0.5, -1.0, 0.25, 2.0);   // CTAD -> quaternion<double>
 
 auto r = p * q;                   // Hamilton product (p*q != q*p in general)
 std::println("{:.3f}", exp(p));   // (1.694,-0.790,-1.184,-1.579)
-std::cout << sqrt(p) << '\n';     // (1.79963,0.555694,0.833541,1.11139)
+std::cout << sqrt(p) << '\n';     // (1.79961,0.555675,0.833512,1.11135)
 auto [w, x, y, z] = p;            // structured bindings
 ```
 
 ## Requirements and build
 
-* A C++23 compiler and standard library with `<format>` (tested with GCC 14 / libstdc++ 14).
+* A C++23 compiler and standard library with `<format>` (tested with GCC 14, and Clang 18/19 with libstdc++ or libc++).
 * CMake 3.20 or newer (optional; the library is a single header).
 
 ```bash
