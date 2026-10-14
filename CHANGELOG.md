@@ -15,7 +15,11 @@ Accuracy figures are worst-case errors against mpmath on random exact inputs (30
     * The log-series stopped early at a term next to a trivial zero of ζ(s−k). ζ there now comes from the reflection formula with the exact offset from −2m.
     * Fuzz: 3.5e13 / 7.1e16 → 100 / 109. At s = 3.00000001, z = −0.8: 6.9e13 / 1.2e15 → < 64.
   * **`lambert_w` (branch 0) for 1 < |z| ≤ 3:** the start log z − log log z could send Halley's iteration to W₋₁ or W₁ (e.g. z = 0.9668 + 0.2678i gave −1.59 + 4.65i). On a grid over 1 < |z| ≤ 6, 407 of 27,692 points were affected. It now starts from log(1+z), or from the branch-point series near z = −1, and checks that the result lies in the range of W₀, retrying from other starts if it does not. Fuzz: 3.6e16 / 7.5e19 → 1.0 / 1.1. Grid: 407 wrong → 0 of 32,800.
-* **Not library bugs:** the fuzz also flagged sph_bessel/sph_neumann on the negative real axis, and K/J results that under- or overflow `double`. The first was a reference issue: mpmath's √(π/2z)·J_{n+½} takes the cut, while j_n and y_n are single-valued. The script now uses the parity relations there and skips results outside the normal range of the type.
+* **Not library bugs:** the fuzz also flagged three other things:
+  * sph_bessel/sph_neumann on the negative real axis;
+  * K/J results that under- or overflow `double`;
+  * H⁽¹⁾ for Im z ≳ 40, where mpmath's `hankel1` cancels in J + iY and loses digits, so the script now raises the working precision by the digits lost.
+  The first case was a reference issue: mpmath's √(π/2z)·J_{n+½} takes the cut, while j_n and y_n are single-valued. The script now uses the parity relations there and skips results outside the normal range of the type.
 * **Tests:** `fuzz_regressions_zeta_polylog_lambert` (17 mpmath references).
 
 ## Faster Bessel functions at small |z|; relative accuracy next to the zeros of J

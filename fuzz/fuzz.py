@@ -152,7 +152,15 @@ def reference(fn, p1, x, y):
     if fn == "cyl_neumann": return mp.bessely(p1, z)
     if fn == "cyl_bessel_i": return mp.besseli(p1, z)
     if fn == "cyl_bessel_k": return mp.besselk(p1, z)
-    if fn == "cyl_hankel_1": return mp.hankel1(p1, z)
+    if fn == "cyl_hankel_1":
+        # mpmath forms J + iY, which cancels badly in the upper half plane (|H1| ~ e^-Im z
+        # while |J| ~ e^Im z); add the lost digits and recompute.
+        h = mp.hankel1(p1, z)
+        lost = int(mp.log10(abs(mp.besselj(p1, z)) / abs(h) + 1)) if h != 0 else 0
+        if lost > 0:
+            with mp.extradps(lost + 10):
+                h = mp.hankel1(p1, z)
+        return h
     if fn in ("sph_bessel", "sph_neumann") and y == 0 and x < 0:
         # j_n and y_n are single-valued: j_n(-x) = (-1)^n j_n(x), y_n(-x) = (-1)^{n+1} y_n(x)
         sgn = (-1) ** (int(p1) + (fn == "sph_neumann"))
@@ -267,11 +275,12 @@ def main():
     lines = ["# mpmath fuzz report", "", "seed `%d`, %d samples per function and type, %.0f s" % (seed, a.n, time.time() - t0), "",
              "| type | function | worst (eps) | bound | at p, z |", "|---|---|---|---|---|"]
     for t, fn, err, b, p1, x, y, tag in rows:
-        lines.append("| %s | %s | %.3g | %g | p=%r, z=%r%+ri (%s) |" % (t, fn, err, b, p1, x, y, tag))
+        lines.append("| %s | %s | %.3g | %g | p=%r, z=%r%s%ri (%s) |" % (t, fn, err, b, p1, x, "+" if float(y) >= 0 else "", y, tag))
     lines += ["", "## %d failure(s)" % len(failures), ""]
     for t, fn, err, b, p1, x, y, tag, re, im, ref in failures[:200]:
-        lines.append("* %s %s(p=%s, z=%s%+si) [%s]: %.3g eps > %g; got %s%+si, mpmath %s" % (
-            t, fn, float(p1).hex(), float(x).hex(), float(y).hex(), tag, err, b, mp.nstr(re, 20), mp.nstr(im, 20), mp.nstr(ref, 20)))
+        lines.append("* %s %s(p=%s, z=%s%s%si) [%s]: %.3g eps > %g; got %s%s%si, mpmath %s" % (
+            t, fn, float(p1).hex(), float(x).hex(), "+" if float(y) >= 0 else "", float(y).hex(), tag, err, b,
+            mp.nstr(re, 20), "+" if im >= 0 else "", mp.nstr(im, 20), mp.nstr(ref, 20)))
     text = "\n".join(lines) + "\n"
     print(text)
     if a.report:
