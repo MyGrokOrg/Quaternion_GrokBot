@@ -567,6 +567,36 @@ template <class T>
     return T(1) - erf_series(z);
 }
 
+// Euler-Maclaurin summation for zeta(s), used for large |Im s| (no cap on |Im s|):
+//   zeta(s) = sum_{k<N} k^{-s} + N^{1-s}/(s-1) + N^{-s}/2
+//             + sum_j B_2j/(2j)! s(s+1)...(s+2j-2) N^{-s-2j+1}.
+// With N >= 0.6 |s| + 20 the tail terms shrink by (|s|/(2 pi N))^2 < 0.07 each, so the
+// 20 available Bernoulli numbers suffice.  Each k^{-s} uses log k in double-T (the phase
+// Im(s) log k is large) and the sum is accumulated in double-T.
+template <class T>
+[[nodiscard]] inline cplx<T> zeta_em(const cplx<T>& s) noexcept {
+    const long N = static_cast<long>(std::ceil(T(0.6) * std::abs(s))) + 20;
+    auto kpow = [&](long k) {
+        const dd<T> lk = log_dd(dd<T>{T(k), T()});
+        return exp_split(cdd<T>{-(lk * s.real()), -(lk * s.imag())});
+    };
+    cdd<T> sum{};
+    for (long k = 1; k < N; ++k) sum = sum + to_cdd(kpow(k));
+    const cplx<T> nps = kpow(N);  // N^{-s}
+    cplx<T> tail = cdiv(T(N) * nps, s - T(1)) + nps / T(2);
+    cplx<T> poch = s, pw = nps / T(N);  // s, N^{-s-1}
+    T fact = T(2);                     // (2j)!
+    for (int j = 1; j <= 20; ++j) {
+        const cplx<T> term = bernoulli_2k<T>(j) / fact * poch * pw;
+        tail += term;
+        if (std::abs(term) <= eps<T>() * eps<T>() * std::abs(tail)) break;
+        poch *= (s + T(2 * j - 1)) * (s + T(2 * j));
+        pw /= T(N) * T(N);
+        fact *= T(2 * j + 1) * T(2 * j + 2);
+    }
+    return to_cplx(sum + to_cdd(tail));
+}
+
 // ---- Riemann zeta ------------------------------------------------------------------
 // Borwein's algorithm 2 for the Dirichlet eta function on Re s >= 1/2:
 // zeta(s) = eta(s) / (1 - 2^(1-s)).  The number of terms is chosen from the target
@@ -595,6 +625,7 @@ template <class T>
         return exp_split(e) * sp.P * riemann_zeta(one_minus_s);
     }
     const T t = std::abs(s.imag());
+    if (t > T(1)) return zeta_em(s);
     const T target = T(std::numeric_limits<T>::digits) * std::log(T(2)) + T(3);
     const T rate = std::log(T(3) + std::sqrt(T(8)));
     const long n = std::clamp(static_cast<long>(std::ceil(

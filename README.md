@@ -120,7 +120,7 @@ So `f(q)` lies in the same complex plane as `q` and commutes with it. On the `i`
 | `digamma(q)` | ψ = Γ′/Γ. Uses the asymptotic series after recurrence, and reflection for `Re < ½`. |
 | `beta(q, b)`, `beta(b, q)` | B(q, b) = Γ(q)Γ(b)/Γ(q+b) for real `b`. Two quaternions on different axes have no well-defined beta. |
 | `erf(q)`, `erfc(q)` | Maclaurin series for `|Re| < ½`, summed in double-length arithmetic. `exp(−z²)` is formed with `z²` split exactly by FMA. Otherwise the Laplace continued fraction for `erfc` (modified Lentz), with `erfc(−z) = 2 − erfc(z)`. |
-| `riemann_zeta(q)` | ζ. Uses Borwein's η algorithm on `Re ≥ ½`, with the number of terms chosen from the precision and `|Im|`, and the functional equation on `Re < ½`. The phases `Im(s)·log k` and the functional-equation exponent are carried in double-length arithmetic. The term count is capped at 6000, which covers `|Im s|` up to about 6,700. ζ(1) = ∞, ζ(0) = −½, and the trivial zeros are exact. |
+| `riemann_zeta(q)` | ζ. On `Re ≥ ½`, uses Borwein's η algorithm for `|Im s| ≤ 1` and Euler–Maclaurin summation otherwise. The Euler–Maclaurin sum takes N ≈ 0.6·|s| + 20 terms plus up to 20 Bernoulli corrections, so there is no cap on `|Im s|`; the cost is O(|s|). On `Re < ½` it uses the functional equation. The phases `Im(s)·log k`, the partial sum and the functional-equation exponent are carried in double-length arithmetic. ζ(1) = ∞, ζ(0) = −½, and the trivial zeros are exact. |
 | `cyl_bessel_j(n, q)` | J_n for integer `n` (an entire function). Uses the power series for `|z| ≤ 1`. Otherwise it uses Miller's backward recurrence, normalized by `1 = J₀ + 2ΣJ₂ₖ` or `cos z = J₀ + 2Σ(−1)ᵏJ₂ₖ`, whichever cancels less. |
 
 **Branch cuts.** The complex kernel is only evaluated on the closed upper half-plane, since `|v| ≥ 0`. On a branch cut along the real axis, the result is the limit from above (imaginary part +0), which is what `std::complex` gives for `(x, +0)`. For example, `asin(2) = π/2 + 1.3169…i`, `lgamma(−2.5) = −0.0562… − 3πi`, and `log1p(−3) = log 2 + πi`. Any imaginary part of a real argument goes on the `i` axis, as with `sqrt` and `log`.
@@ -142,13 +142,13 @@ Typical errors are a few ulp. In the large-argument regions, again for exact inp
 | lgamma | 2.1 ulp | 2.5 ulp | −10⁶ ≤ Re z ≤ −4500, Im z ≤ 10⁵ |
 | erf, erfc | 13 ulp | 18 ulp | \|Re z\|, \|Im z\| ≤ 26 |
 | asin, acos, asinh, acosh | 2.5 ulp | 3.2 ulp (both libstdc++ and libc++) | 10⁻²⁰⁰ to 10²⁰⁰, next to ±1 |
-| riemann_zeta | 240 ulp | 64 ulp | −2 ≤ Re s ≤ 3, 300 ≤ Im s ≤ 5000 |
+| riemann_zeta | 19 ulp (≤ 4 ulp for Im s ≥ 1500) | 14 ulp (≤ 4 ulp for Im s ≥ 1500) | −2 ≤ Re s ≤ 3, 1 ≤ Im s ≤ 120,000 |
 
 Some limits are inherent:
 
 * **Γ and log Γ conditioning.** Rounding the input z by ε changes Γ(z) by about `|z·ψ(z)|·ε ≈ |z log z|·ε`. The library adds only a few ulp to that, but no algorithm can remove it for inexact inputs.
 * **erf conditioning.** The input sensitivity is about `2|z|²·ε`.
-* **ζ conditioning.** The input sensitivity is `|s·ζ′(s)/ζ(s)|·ε`, which is about 7000·ε at |Im s| ≈ 1300 on the critical strip. Even with exact inputs, the alternating η sum then has a few tens of ulp of rounding left.
+* **ζ conditioning.** The input sensitivity is `|s·ζ′(s)/ζ(s)|·ε`, which is about 7000·ε at |Im s| ≈ 1300 on the critical strip and grows with |Im s|. For exact inputs the library stays within a few ulp. The cost grows linearly in |Im s|: about 1 s at |Im s| = 10⁶ in double, and about 2 s at 10⁵ in x87 `long double`, because `fmal` is done in software.
 * J_n for `|z|` beyond about 10⁵: the cost grows like `O(|z|)`.
 
 #### More special functions

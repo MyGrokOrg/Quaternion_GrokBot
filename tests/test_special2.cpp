@@ -963,7 +963,7 @@ namespace {
 // mpmath references (50 digits) for the accuracy limits removed in the double-T rework:
 // Gamma for large |z|, log Gamma for Re z < -4000 (continuous branch), erf/erfc for large
 // |z|^2, inverse trig/hyperbolic functions at extreme and near-branch-point arguments,
-// zeta for |Im s| up to 2000, and Gamma(a, z) for a at or near non-positive integers next
+// zeta for |Im s| up to 1e5, and Gamma(a, z) for a at or near non-positive integers next
 // to the negative real axis or with 1/2 < a.  Inputs are exact in float.
 constexpr ref3 refs5[] = {
     {"tgamma", 0.0L, 0x1.9100000000000p+6L, 0x1.9400000000000p+5L, -5.2377531853770806850215766143501e+150L, 1.2555763529942010921518233564383e+151L},
@@ -1058,6 +1058,13 @@ constexpr ref3 refs5[] = {
     {"tgamma_upper", -0x1.3000000000000p+2L, -0x1.e400000000000p+5L, 0x1.3800000000000p+4L, -3.3436200899729537287222023132999e+15L, 8.1689698007061626766263038046749e+15L},
     {"tgamma_upper", 0x1.2000000000000p+1L, -0x1.6a00000000000p+6L, 0x1.8000000000000p+0L, -4.1077439155216159069810860735802e+41L, 3.7173458193487621021898977822099e+41L},
     {"tgamma_upper", 0x1.c000000000000p-1L, -0x1.6000000000000p+2L, 0x1.c000000000000p+0L, -100.39835007587359790952399765106L, -174.51787406674878972341704426999L},
+    // zeta for |Im s| up to 1e5 (Euler-Maclaurin; no cap on |Im s|).
+    {"riemann_zeta", 0.0L, 0x1.0000000000000p-1L, 0x1.7710000000000p+11L, 3.6902421180068431077266195166759L, -1.7127162557953904744595252658767L},
+    {"riemann_zeta", 0.0L, 0x1.0000000000000p-2L, 0x1.3882000000000p+13L, 2.2220903109977247669027195910386L, -1.8285936054679729907559050304918L},
+    {"riemann_zeta", 0.0L, -0x1.8000000000000p+0L, 0x1.d4cc000000000p+12L, 8.6062719965339772541158090889714e+5L, 7.5053949525865553848176539051992e+5L},
+    {"riemann_zeta", 0.0L, 0x1.0000000000000p+1L, 0x1.3882000000000p+14L, 0.92571782380300895162217861787439L, -0.18663004211346014345247438102339L},
+    {"riemann_zeta", 0.0L, 0x1.8000000000000p-1L, 0x1.d4c1000000000p+14L, 0.66205998414659203779599472079343L, 0.13431105475386408842555150061869L},
+    {"riemann_zeta", 0.0L, 0x1.0000000000000p-1L, 0x1.86a0400000000p+16L, 7.5745722213427006004653209212246L, 1.3618005730625587804418981342935L},
 };
 
 template <class T> void accuracy_limits() {
@@ -1079,7 +1086,7 @@ template <class T> void accuracy_limits() {
         else if (r.fn == "lgamma") got = quat::lgamma(q);
         else if (r.fn == "erf") got = quat::erf(q);
         else if (r.fn == "erfc") got = quat::erfc(q);
-        else if (r.fn == "riemann_zeta") { got = quat::riemann_zeta(q); k = T(128); }
+        else if (r.fn == "riemann_zeta") { got = quat::riemann_zeta(q); k = T(16); }
         else if (r.fn == "asin") got = quat::asin(q);
         else if (r.fn == "acos") got = quat::acos(q);
         else if (r.fn == "asinh") got = quat::asinh(q);
