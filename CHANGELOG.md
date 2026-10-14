@@ -19,7 +19,8 @@ Accuracy figures are worst-case errors against mpmath on random exact inputs (30
 * **Fuzz script:**
   * Results within 2¹² of the largest finite value are skipped. Another Bessel intermediate still overflows there: Y_ν at ν = 84.5, |z| ≈ 0.014 gives −inf for Im Y ≈ −1.87e307 (seed 1304285165, clang-18/libc++). This is a documented limit.
   * Hurwitz ζ(s, a) with Re a < 0 is now measured against the largest term |a + n|^−s, because the terms cancel at its real zeros. One example from seed 1842008100: s = 0.83, a = −5.41, ζ ≈ 5.9e-4 measured 360 ε relative, which is about 1 ε of the largest term.
-  * The Airy bound is now 128 ε, because the condition number grows like |z|^{3/2}. The largest error seen was 69.6 ε in long double at z ≈ −18.6 + 5.8i.
+  * The Airy bound is now 128 ε, because the condition number |z·Ai′(z)/Ai(z)| grows like |z|^{3/2}. The largest error seen was 69.6 ε in long double at z ≈ −18.6 + 5.8i (clang-18/libc++), where mpmath gives a condition number of 86.2 (|z|^{3/2} = 86.3).
+  * Over 200 inputs perturbed by up to 10⁻³ around that point, the errors stayed below 1.03 × condition × ε, with a median of 0.3. This held for double and long double, and for libstdc++ and libc++. The same point gives 8.4 ε with gcc-14/libstdc++. The size of the error follows the conditioning rather than any one toolchain.
 * **Tests:**
   * `std_format`: 23 new checks across 3 types, including error cases.
   * `mixed_precision`: result types via `static_assert`, values, complex on either side, equality, and `constexpr` use.
