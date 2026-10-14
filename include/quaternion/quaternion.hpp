@@ -286,7 +286,9 @@ template <class T>
 namespace detail {
 template <class T>
 [[nodiscard]] inline T vabs(const quaternion<T>& q) noexcept {
-    return std::hypot(q.x(), q.y(), q.z());
+    // Nested two-argument hypot: libc++ 18's three-argument std::hypot squares its
+    // arguments without scaling and overflows/underflows (e.g. for float beyond 2^64).
+    return std::hypot(std::hypot(q.x(), q.y()), q.z());
 }
 // Rebuild s + u*v where u is the unit vector of q (i if q has no vector part).
 template <class T>

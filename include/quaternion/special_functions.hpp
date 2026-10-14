@@ -1911,7 +1911,7 @@ template <class T>
 template <class T, class F>
 [[nodiscard]] inline quaternion<T> lift(const quaternion<T>& q, F&& f, bool real_on_real) {
     using W = work_t<T>;
-    const W v = static_cast<W>(std::hypot(q.x(), q.y(), q.z()));
+    const W v = static_cast<W>(quat::detail::vabs(q));
     const cplx<W> r = f(cplx<W>(static_cast<W>(q.w()), v));
     if (v == W()) {
         if (real_on_real) return {static_cast<T>(r.real()), q.x(), q.y(), q.z()};
