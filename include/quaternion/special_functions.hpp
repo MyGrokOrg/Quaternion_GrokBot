@@ -147,6 +147,16 @@ template <class T>
 template <class T>
 [[nodiscard]] inline dd<T> two_prod(T a, T b) noexcept {
     const T p = a * b;
+    if constexpr (std::numeric_limits<T>::digits == 64) {
+        // x87 extended: std::fma is a slow software routine, so use Dekker's exact product
+        // (Veltkamp split at 2^32 + 1); exact unless a or b is within 2^32 of overflow.
+        if (std::abs(a) < T(0x1p+16000L) && std::abs(b) < T(0x1p+16000L)) {
+            constexpr T split = T(4294967297.0L);
+            const T ta = split * a, ah = ta - (ta - a), al = a - ah;
+            const T tb = split * b, bh = tb - (tb - b), bl = b - bh;
+            return {p, ((ah * bh - p) + ah * bl + al * bh) + al * bl};
+        }
+    }
     return {p, std::fma(a, b, -p)};
 }
 template <class T>
@@ -703,6 +713,65 @@ template <class T>
     return cdiv(eta, denom);
 }
 
+// ---- Ascending series for J and I, evaluated in double-T -----------------------------
+// J_nu(z) = (z/2)^nu / Gamma(nu+1) * S,  S = sum_k (-+ z^2/4)^k / (k! (nu+1)_k)   (DLMF 10.2.2, 10.25.2)
+// Used for |z| <= 16.  S is summed in double-T, so the cancellation between its terms (at
+// most about e^|z|) costs nothing at T precision: the result has a *relative*
+// error of a few ulp, including next to the zeros of J.  The prefactor is formed as
+// exp(nu log(z/2) - log Gamma(nu+1)) with the exponent in double-T; for nu + 1 < 0 the
+// imaginary part of the loggamma branch supplies the sign of Gamma.  nu must not be a
+// negative integer (callers use J_{-n} = (-1)^n J_n, I_{-n} = I_n) and z != 0.
+template <class T>
+[[nodiscard]] inline bool bessel_series_ok(T nu, T az) noexcept {
+    (void)nu;
+    return az <= T(16);
+}
+template <class T>
+[[nodiscard]] inline cplx<T> bessel_series(T nu, const cplx<T>& z, bool modified) noexcept {
+    const dd<T> x{z.real() / T(2), T()}, y{z.imag() / T(2), T()};
+    cdd<T> h2{two_prod(x.hi, x.hi) - two_prod(y.hi, y.hi), two_prod(x.hi, y.hi) * T(2)};
+    if (!modified) h2 = {-h2.re, -h2.im};
+    const T peak = std::abs(z) * std::abs(z) / T(4);
+    const T tol = eps<T>() * eps<T>() / T(8);
+    cdd<T> term{{T(1), T()}, {}}, sum = term;
+    T maxterm = T(1);
+    for (int k = 1; k < 100000; ++k) {
+        const dd<T> inv = dd<T>{T(1), T()} / (two_sum(nu, T(k)) * T(k));
+        term = term * h2;
+        term = {term.re * inv, term.im * inv};
+        sum = sum + term;
+        const T at = std::max(std::abs(term.re.hi), std::abs(term.im.hi));
+        maxterm = std::max(maxterm, at);
+        if (T(k) * (T(k) + nu) > peak &&
+            at <= tol * std::max(std::max(std::abs(sum.re.hi), std::abs(sum.im.hi)), eps<T>() * maxterm))
+            break;
+    }
+    if (nu == T()) return to_cplx(sum);
+    const T lmax = std::log(std::numeric_limits<T>::max()) / T(2);
+    const T g = std::abs(nu) <= T(150) ? std::tgamma(nu + T(1)) : T();
+    if (std::isfinite(g) && g != T() && std::abs(nu * std::log(std::abs(z) / T(2))) < lmax) {
+        // (z/2)^nu = (z/2)^n (z/2)^f, n = floor(nu): the integer power by binary powering in
+        // double-T, the fractional one (|f log(z/2)| small) in T; 1/Gamma(nu+1) from the C
+        // library (correctly signed for nu + 1 < 0).
+        const T fl = std::floor(nu), f = nu - fl;
+        long n = static_cast<long>(std::abs(fl));
+        cdd<T> b{x, y}, pw{{T(1), T()}, {}};
+        while (n) {
+            if (n & 1) pw = pw * b;
+            b = b * b;
+            n >>= 1;
+        }
+        cplx<T> pre = to_cplx(pw);
+        if (fl < T()) pre = cdiv(T(1), pre);
+        if (f != T()) pre *= std::exp(f * std::log(cplx<T>(x.hi, y.hi)));
+        return (pre / g) * to_cplx(sum);
+    }
+    // Large order: exp(nu log(z/2) - log Gamma(nu+1)) with the exponent in double-T.
+    const cdd<T> lz = clog_dd(x, y);
+    const cdd<T> lg = lgamma_dd(two_sum(nu, T(1)), T());
+    return exp_split(cdd<T>{lz.re * nu - lg.re, lz.im * nu - lg.im}) * to_cplx(sum);
+}
+
 template <class T>
 struct bessel_all;
 template <class T>
@@ -717,19 +786,7 @@ template <class T>
     }
     if (z == cplx<T>()) return {n == 0 ? T(1) : T(), T()};
     const T az = std::abs(z);
-    if (az <= T(1)) {
-        // Power series: no significant cancellation for |z| <= 1.
-        const cplx<T> h = z / T(2), mh2 = -h * h;
-        cplx<T> lead(T(1));
-        for (int j = 1; j <= n; ++j) lead *= h / T(j);
-        cplx<T> term(T(1)), sum(T(1));
-        for (int k = 1; k < 1000; ++k) {
-            term *= mh2 / (T(k) * T(n + k));
-            sum += term;
-            if (std::abs(term) <= eps<T>() * std::abs(sum) / 4) break;
-        }
-        return lead * sum;
-    }
+    if (bessel_series_ok(T(n), az)) return bessel_series(T(n), z, false);
     if (az >= T(16) && T(n) * T(n) < az) return bessel_jyh(T(n), z).j;  // Hankel asymptotics
     // Miller's backward recurrence f_{k-1} = (2k/z) f_k - f_{k+1}, normalised by
     // either 1 = J0 + 2 sum J_{2k} or cos z = J0 + 2 sum (-1)^k J_{2k}, whichever
@@ -1022,8 +1079,132 @@ template <class T>
 // solution for increasing order on Re w >= 0, so the recurrence is stable (Temme).
 template <class T>
 struct kpair { cplx<T> k0, k1; };
+// K_a and K_{a+1} for |a| <= 1/2 and small |w| (|w| <= 2, Re w >= 0) by Temme's series
+// (Temme 1975; Numerical Recipes 6.7), with 1/Gamma(1 +- a) and the auxiliary
+// gamma1(a), gamma2(a) taken from the Taylor series of 1/Gamma(1+x).
+template <class T>
+[[nodiscard]] inline kpair<T> bessel_k_temme(T a, const cplx<T>& w) noexcept {
+    static constexpr long double c[] = {
+    1.0L, 0.577215664901532860606512090082402431L, -0.655878071520253881077019515145390481L,
+    -0.0420026350340952355290039348754298187L, 0.166538611382291489501700795102105236L,
+    -0.0421977345555443367482083012891873913L, -0.00962197152787697356211492167234819898L,
+    0.00721894324666309954239501034044657271L, -0.00116516759185906511211397108401838867L,
+    -0.000215241674114950972815729963053647806L, 0.000128050282388116186153198626328164323L,
+    -0.0000201348547807882386556893914210218184L, -0.00000125049348214267065734535947383309224L,
+    0.00000113302723198169588237412962033074494L, -0.000000205633841697760710345015413002057284L,
+    0.00000000611609510448141581786249868285534287L, 0.0000000050020076444692229300556650480599913L,
+    -0.00000000118127457048702014458812656543650558L, 0.000000000104342671169110051049154033231225019L,
+    7.78226343990507125404993731136077723e-12L, -3.69680561864220570818781587808576624e-12L,
+    5.1003702874544759790154813228632318e-13L, -2.05832605356650678322242954485523742e-14L,
+    -5.34812253942301798237001731872793995e-15L, 1.22677862823826079015889384662242243e-15L,
+    -1.18125930169745876951376458684229783e-16L, 1.18669225475160033257977724292867407e-18L,
+    1.41238065531803178155580394756670904e-18L, -2.29874568443537020659247858063369926e-19L,
+    1.71440632192733743338396337026725707e-20L, 1.33735173049369311486478139512226802e-22L,
+    -2.0542335517666727893250253513557338e-22L, 2.73603004860799984483150990433098201e-23L};
+    T gp{}, gm{}, g1{}, g2{}, ak = T(1);
+    for (int k = 0; k < static_cast<int>(sizeof(c) / sizeof(c[0])); ++k) {
+        const T ck = static_cast<T>(c[k]);
+        gp += ck * ak;
+        gm += (k % 2 ? -ck : ck) * ak;
+        if (k % 2) g1 -= ck * ak / (a == T() ? T(1) : a);
+        else g2 += ck * ak;
+        ak *= a;
+    }
+    if (a == T()) g1 = -static_cast<T>(c[1]);
+    const cplx<T> x2 = w / T(2);
+    const cplx<T> d = -std::log(x2);
+    const cplx<T> e = a * d;
+    const T fact = a == T() ? T(1) : a * pi<T> / sinpi(a);
+    const cplx<T> fact2 = std::abs(e) < eps<T>() ? cplx<T>(T(1)) : std::sinh(e) / e;
+    cplx<T> ff = fact * (g1 * std::cosh(e) + g2 * fact2 * d);
+    cplx<T> sum = ff;
+    const cplx<T> ee = std::exp(e);
+    cplx<T> p = T(0.5) * ee / gp, q = T(0.5) / (ee * gm);
+    cplx<T> cc(T(1));
+    const cplx<T> x22 = x2 * x2;
+    cplx<T> sum1 = p, c0{}, c1{};
+    for (int i = 1; i < 500; ++i) {
+        const T ti = T(i);
+        ff = (ti * ff + p + q) / (ti * ti - a * a);
+        cc *= x22 / ti;
+        p /= (ti - a);
+        q /= (ti + a);
+        const cplx<T> del = cc * ff, del1 = cc * (p - ti * ff);
+        const cplx<T> y0 = del - c0, t0 = sum + y0;  // compensated sums
+        c0 = (t0 - sum) - y0;
+        sum = t0;
+        const cplx<T> y1 = del1 - c1, t1 = sum1 + y1;
+        c1 = (t1 - sum1) - y1;
+        sum1 = t1;
+        if (std::abs(del) < eps<T>() / T(4) * std::abs(sum) && std::abs(del1) < eps<T>() / T(4) * std::abs(sum1)) break;
+    }
+    return {sum, sum1 * cdiv(T(2), w)};
+}
+// K_a and K_{a+1}, |a| <= 1/2, Re w >= 0, by Steed's method on Temme's continued fraction
+// CF2 (Numerical Recipes 6.7, Thompson & Barnett 1987); used for 2 < |w| < 8.  Sets ok to
+// false if it has not converged.
+template <class T>
+[[nodiscard]] inline kpair<T> bessel_k_cf2(T a, const cplx<T>& w, bool& ok) noexcept {
+    const T a1 = T(0.25) - a * a;
+    cplx<T> b = T(2) * (T(1) + w), d = cdiv(T(1), b), h = d, delh = d;
+    cplx<T> q1{}, q2(T(1)), q(a1), c(a1), s = T(1) + q * delh, hc{}, sc{};
+    T aa = -a1;
+    ok = false;
+    for (int i = 1; i < 20000; ++i) {
+        aa -= T(2 * i);
+        c = -aa * c / T(i + 1);
+        const cplx<T> qnew = (q1 - b * q2) / aa;
+        q1 = q2;
+        q2 = qnew;
+        q += c * qnew;
+        b += T(2);
+        d = cdiv(T(1), b + aa * d);
+        delh = (b * d - T(1)) * delh;
+        // compensated (Kahan) sums: the terms alternate in phase and many are needed near
+        // the imaginary axis
+        const cplx<T> yh = delh - hc, th = h + yh;
+        hc = (th - h) - yh;
+        h = th;
+        const cplx<T> dels = q * delh;
+        const cplx<T> ys = dels - sc, ts = s + ys;
+        sc = (ts - s) - ys;
+        s = ts;
+        if (std::abs(dels) < eps<T>() / T(4) * std::abs(s) && std::abs(delh) < eps<T>() / T(4) * std::abs(h)) {
+            ok = true;
+            break;
+        }
+    }
+    h *= a1;
+    const cplx<T> k0 = cdiv(std::sqrt(pi<T> / T(2)) * std::exp(-w), std::sqrt(w) * s);
+    const cplx<T> k1 = k0 * cdiv(a + w + T(0.5) - h, w);
+    return {k0, k1};
+}
 template <class T>
 [[nodiscard]] inline kpair<T> bessel_k_pair(T mu, const cplx<T>& w) {
+    const T aw = std::abs(w);
+    bool ok = true;
+    kpair<T> r{};
+    const T nr = std::nearbyint(mu), ar = mu - nr;
+    // Hankel's expansion where it converges (|w| >= 8), otherwise the series / CF2 at the base
+    // order ar and upward recurrence; the Laplace integral only if CF2 fails to converge.
+    bool small = aw < T(8);
+    if (!small) small = !(bessel_k_asym(ar, w, r.k0) && bessel_k_asym(ar + T(1), w, r.k1));
+    if (small) {
+        if (std::abs(ar) == T(0.5)) {
+            // half-integer order: K_{1/2}(w) = sqrt(pi/(2w)) e^{-w}, K_{3/2} = K_{1/2} (1 + 1/w)
+            const cplx<T> k = cdiv(std::sqrt(pi<T> / T(2)) * std::exp(-w), std::sqrt(w));
+            r = ar > T() ? kpair<T>{k, k + cdiv(k, w)} : kpair<T>{k, k};  // K_{-1/2} = K_{1/2}
+        } else if (aw <= T(2)) r = bessel_k_temme(ar, w);
+        else r = bessel_k_cf2(ar, w, ok);
+    }
+    if (ok) {
+        const cplx<T> tw = cdiv(T(2), w);
+        for (long j = 1; j <= static_cast<long>(nr); ++j) {
+            const cplx<T> c = r.k0 + (ar + T(j)) * tw * r.k1;
+            r = {r.k1, c};
+        }
+        return r;
+    }
     if (mu < T(2)) return {bessel_k_one(mu, w), bessel_k_one(mu + T(1), w)};
     const T fl = std::floor(mu), m0 = mu - fl;
     const long n = static_cast<long>(fl);
@@ -1128,6 +1309,11 @@ template <class T>
         if (nu > T() || is_integer(nu)) return {};
         return {std::numeric_limits<T>::infinity(), T()};
     }
+    if (is_integer(nu) && nu < T()) {
+        const cplx<T> r = bessel_j_nu(-nu, z);
+        return std::fmod(nu, T(2)) == T() ? r : -r;
+    }
+    if (bessel_series_ok(nu, std::abs(z))) return bessel_series(nu, z, false);
     return bessel_jyh(nu, z).j;
 }
 template <class T>
@@ -1188,6 +1374,7 @@ template <class T>
         if (nu > T() || is_integer(nu)) return {};
         return {std::numeric_limits<T>::infinity(), T()};
     }
+    if (bessel_series_ok(is_integer(nu) ? mu : nu, std::abs(w))) return bessel_series(is_integer(nu) ? mu : nu, w, true);
     cplx<T> i;
     if (w.real() >= T()) i = bessel_i_right(mu, w);
     else i = expi_pi(on_lower_side(w) ? -mu : mu) * bessel_i_right(mu, -w);  // I(w e^{+-i pi}) = e^{+-i mu pi} I(w)
@@ -1201,6 +1388,7 @@ template <class T>
 template <class T>
 [[nodiscard]] inline cplx<T> sph_bessel_j(unsigned n, const cplx<T>& z) {
     if (z == cplx<T>()) return {n == 0 ? T(1) : T(), T()};
+    if (bessel_series_ok(T(n) + T(0.5), std::abs(z))) return sph_factor(z) * bessel_series(T(n) + T(0.5), z, false);
     return sph_factor(z) * bessel_jyh(T(n) + T(0.5), z).j;
 }
 template <class T>

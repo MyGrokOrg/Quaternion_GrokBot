@@ -100,6 +100,18 @@ void special() {
     // Bessel: small, large |z| and large order
     const auto b1 = around<T>(T(2)), b30 = around<T>(T(30)), b300 = around<T>(T(300)), b3k = around<T>(T(3000));
     add<T>("bessel", "J_2.5(|z|~2)", b1, [](const Q<T>& q) { return quat::cyl_bessel_j(T(2.5), q); });
+    const auto b05 = around<T>(T(0.5)), b6 = around<T>(T(6)), b10 = around<T>(T(10));
+    add<T>("bessel", "J_2.5(|z|~0.5)", b05, [](const Q<T>& q) { return quat::cyl_bessel_j(T(2.5), q); });
+    add<T>("bessel", "J_2.5(|z|~6)", b6, [](const Q<T>& q) { return quat::cyl_bessel_j(T(2.5), q); });
+    add<T>("bessel", "J_0.3(|z|~10)", b10, [](const Q<T>& q) { return quat::cyl_bessel_j(T(0.3), q); });
+    add<T>("bessel", "J_3(|z|~6)", b6, [](const Q<T>& q) { return quat::cyl_bessel_j(3, q); });
+    add<T>("bessel", "I_1.5(|z|~2)", b1, [](const Q<T>& q) { return quat::cyl_bessel_i(T(1.5), q); });
+    add<T>("bessel", "I_0.3(|z|~6)", b6, [](const Q<T>& q) { return quat::cyl_bessel_i(T(0.3), q); });
+    add<T>("bessel", "sph_j_2(|z|~2)", b1, [](const Q<T>& q) { return quat::sph_bessel(2u, q); });
+    add<T>("bessel", "Y_1.5(|z|~2)", b1, [](const Q<T>& q) { return quat::cyl_neumann(T(1.5), q); });
+    add<T>("bessel", "K_0.3(|z|~2)", b1, [](const Q<T>& q) { return quat::cyl_bessel_k(T(0.3), q); });
+    add<T>("bessel", "Y_0.3(|z|~6)", b6, [](const Q<T>& q) { return quat::cyl_neumann(T(0.3), q); });
+    add<T>("bessel", "K_0.5(|z|~2)", b1, [](const Q<T>& q) { return quat::cyl_bessel_k(T(0.5), q); });
     add<T>("bessel", "J_2.5(|z|~30)", b30, [](const Q<T>& q) { return quat::cyl_bessel_j(T(2.5), q); });
     add<T>("bessel", "J_2.5(|z|~300)", b300, [](const Q<T>& q) { return quat::cyl_bessel_j(T(2.5), q); });
     add<T>("bessel", "J_2.5(|z|~3000)", b3k, [](const Q<T>& q) { return quat::cyl_bessel_j(T(2.5), q); });
