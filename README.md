@@ -112,15 +112,15 @@ So `f(q)` lies in the same complex plane as `q` and commutes with it. On the `i`
 
 | Function | Notes |
 |---|---|
-| `asin acos atan asinh acosh atanh` | Branch cuts are those of `std::complex` (C99 Annex G). `asin`, `acos`, `asinh` and `acosh` call the `std::complex` functions. `atanh` and `atan` have their own kernels: `(log1p z − log1p(−z))/2`, with `atanh(1/z) ± iπ/2` for `|z| > 1`, and `atan z = −i·atanh(iz)`. They are accurate to a few ulp on every standard library. |
+| `asin acos atan asinh acosh atanh` | Branch cuts are those of `std::complex` (C99 Annex G). `asin` and `acos` use the algorithm of Hull, Fairgrieve and Tang (1997), with `asinh z = −i·asin(iz)` and `acosh` from `acos`. `atanh` and `atan` have their own kernels: `(log1p z − log1p(−z))/2`, with `atanh(1/z) ± iπ/2` for `|z| > 1`, and `atan z = −i·atanh(iz)`. They are accurate to a few ulp on every standard library. |
 | `expm1(q)`, `log1p(q)` | Keep full relative accuracy for small `q`. |
 | `cbrt(q)` | Principal cube root (`cbrt(-8) = 1 + √3 i`), like `std::pow(z, 1/3)`. For real `x ≥ 0` it matches `std::cbrt`. |
-| `tgamma(q)` | Γ. Uses reflection `Γ(z)Γ(1−z) = π/sin πz` for `Re < ½`. Gives ±∞ at 0 and NaN at negative integers, like `<cmath>`. |
-| `lgamma(q)` | log Γ on the analytic-continuation branch (mpmath's `loggamma`). The real part is `log|Γ|`, which equals `std::lgamma` on the real axis. |
+| `tgamma(q)` | Γ = exp(log Γ), with log Γ carried in double-length (hi + lo) arithmetic, so the size of log Γ costs no accuracy. Uses reflection `Γ(z)Γ(1−z) = π/sin πz` for `Re < ½`, with sin πz kept in split exponential form so it cannot overflow. Gives ±∞ at 0 and NaN at negative integers, like `<cmath>`. |
+| `lgamma(q)` | log Γ on the analytic-continuation branch (mpmath's `loggamma`). The real part is `log|Γ|`, which equals `std::lgamma` on the real axis. For `Re z < −4000` it uses reflection, then restores the continuous branch by choosing the multiple of 2πi from Stirling's formula. |
 | `digamma(q)` | ψ = Γ′/Γ. Uses the asymptotic series after recurrence, and reflection for `Re < ½`. |
 | `beta(q, b)`, `beta(b, q)` | B(q, b) = Γ(q)Γ(b)/Γ(q+b) for real `b`. Two quaternions on different axes have no well-defined beta. |
-| `erf(q)`, `erfc(q)` | Maclaurin series for `|Re| < ½`. Otherwise the Laplace continued fraction for `erfc` (modified Lentz), with `erfc(−z) = 2 − erfc(z)`. |
-| `riemann_zeta(q)` | ζ. Uses Borwein's η algorithm on `Re ≥ ½`, with the number of terms chosen from the precision and `|Im|`, and the functional equation on `Re < ½`. ζ(1) = ∞, ζ(0) = −½, and the trivial zeros are exact. |
+| `erf(q)`, `erfc(q)` | Maclaurin series for `|Re| < ½`, summed in double-length arithmetic. `exp(−z²)` is formed with `z²` split exactly by FMA. Otherwise the Laplace continued fraction for `erfc` (modified Lentz), with `erfc(−z) = 2 − erfc(z)`. |
+| `riemann_zeta(q)` | ζ. Uses Borwein's η algorithm on `Re ≥ ½`, with the number of terms chosen from the precision and `|Im|`, and the functional equation on `Re < ½`. The phases `Im(s)·log k` and the functional-equation exponent are carried in double-length arithmetic. The term count is capped at 6000, which covers `|Im s|` up to about 6,700. ζ(1) = ∞, ζ(0) = −½, and the trivial zeros are exact. |
 | `cyl_bessel_j(n, q)` | J_n for integer `n` (an entire function). Uses the power series for `|z| ≤ 1`. Otherwise it uses Miller's backward recurrence, normalized by `1 = J₀ + 2ΣJ₂ₖ` or `cos z = J₀ + 2Σ(−1)ᵏJ₂ₖ`, whichever cancels less. |
 
 **Branch cuts.** The complex kernel is only evaluated on the closed upper half-plane, since `|v| ≥ 0`. On a branch cut along the real axis, the result is the limit from above (imaginary part +0), which is what `std::complex` gives for `(x, +0)`. For example, `asin(2) = π/2 + 1.3169…i`, `lgamma(−2.5) = −0.0562… − 3πi`, and `log1p(−3) = log 2 + πi`. Any imaginary part of a real argument goes on the `i` axis, as with `sqrt` and `log`.
@@ -134,12 +134,21 @@ So `f(q)` lies in the same complex plane as `q` and commutes with it. On the `i`
 | riemann_zeta | 6e-14 | 3e-17 |
 | cyl_bessel_j | 1.2e-13 (near real zeros) | 2.5e-17 |
 
-Typical errors are a few ulp. Accuracy degrades in these cases:
+Typical errors are a few ulp. In the large-argument regions, again for exact inputs, these are the worst errors measured against mpmath (300 random points each):
 
-* Gamma for large `|z|`: the relative error grows like `|lgamma(z)|·ε`.
-* erf/erfc where `|z|²` is large: the error of `exp(−z²)` grows like `|z|²·ε`.
-* ζ for `|Im s|` above a few hundred (the number of terms is capped).
-* lgamma for `Re z < −4000`: it falls back to reflection, so the imaginary part may be off by a multiple of 2π.
+| | double | long double (x87) | region |
+|---|---|---|---|
+| tgamma | 3.4 ulp | 3.9 ulp | \|Re z\| ≤ 160, 0 ≤ Im z ≤ 300 |
+| lgamma | 2.1 ulp | 2.5 ulp | −10⁶ ≤ Re z ≤ −4500, Im z ≤ 10⁵ |
+| erf, erfc | 13 ulp | 18 ulp | \|Re z\|, \|Im z\| ≤ 26 |
+| asin, acos, asinh, acosh | 2.5 ulp | 3.2 ulp (both libstdc++ and libc++) | 10⁻²⁰⁰ to 10²⁰⁰, next to ±1 |
+| riemann_zeta | 240 ulp | 64 ulp | −2 ≤ Re s ≤ 3, 300 ≤ Im s ≤ 5000 |
+
+Some limits are inherent:
+
+* **Γ and log Γ conditioning.** Rounding the input z by ε changes Γ(z) by about `|z·ψ(z)|·ε ≈ |z log z|·ε`. The library adds only a few ulp to that, but no algorithm can remove it for inexact inputs.
+* **erf conditioning.** The input sensitivity is about `2|z|²·ε`.
+* **ζ conditioning.** The input sensitivity is `|s·ζ′(s)/ζ(s)|·ε`, which is about 7000·ε at |Im s| ≈ 1300 on the critical strip. Even with exact inputs, the alternating η sum then has a few tens of ulp of rounding left.
 * J_n for `|z|` beyond about 10⁵: the cost grows like `O(|z|)`.
 
 #### More special functions
@@ -211,6 +220,7 @@ These also use axis reduction. Real parameters such as orders, degrees, moduli a
 | Lambert W next to −1/e (\|z + 1/e\| from 1e-19 to 0.3; branches 0, ±1) | 3 ulp | 3 ulp | |
 | Li_s, non-integer 3 < s ≤ 25, e^5.5 < \|z\| < e^40 | 3e-14 | 1.2e-17 | |
 | Γ(a, z), γ(a, z), −4 ≤ a ≤ 8 | 8e-13 | 7e-17 | ≤ 20 |
+| Γ(a, z), a within 0.5 of 0, −1, …, −7 (including the integers), all arg z | 2e-14 | 1.2e-17 | \|z\| ≤ 30 |
 | I_x(a, b), 0.2 ≤ a, b ≤ 6 | 6e-15 | 2e-18 | \|x\| ≤ 1.5 |
 
 Accuracy degrades in these cases:
@@ -219,7 +229,7 @@ Accuracy degrades in these cases:
 * **Complex `a` (internal).** Li_s calls ζ(1−s, a) with complex `a`, which is accurate there because Im s = 0. With complex `a`, Re s < −6 and |Im s| > 8, Hermite's integral cancels by up to about 10³·|s|·ε. With complex `a`, Re s > 3 and small |Im s|, neither method is reliable. No public function reaches either case.
 * **Bessel functions.** The quadrature behind K_ν is adaptive, and the J/I continued fractions need O(|z|) terms, so large |z| or |ν| is slow but still accurate.
 * **Lambert W at −1/e.** W is computed to a few ulp of the exact value for the given floating-point input. Because W ≈ −1 + √(2e(z + 1/e)), an input rounding error δ moves the true W by about √(2e)·δ/(2√|z + 1/e|). That error comes from the input, not from this library. Also, a quaternion argument q = a + |v|u can only reach one side of the cut along (−∞, −1/e], namely the |v| ≥ 0 side. So branches k and −k are related by conjugation when the axis is reversed.
-* **Γ(a, z) for a within 1e-3 of a negative integer** near the negative real axis. It uses the recurrence, with some cancellation.
+* **Γ(a, z) for a ≤ ½.** Outside the continued-fraction sector, the power series is used around the nearest pole a = −n + δ. The pole of Γ(a) and the k = n series term are combined analytically as `(−1)ⁿ/n!·[expm1(log Γ(1+δ) − Σ log1p(−δ/m)) − expm1(δ log z)]/δ`, so there is no cancellation at a = −n ± small, or at the integers. (The old downward recurrence lost up to |z|ⁿ.) For ½ < a < 1 next to the negative real axis, `Q(a, z)·Γ(a)` still loses up to about 500 ulp.
 
 **Not provided.** Elliptic integrals with two quaternion parameters and Hurwitz ζ with a quaternion `a` are not provided, since axis reduction needs a single quaternion argument.
 
@@ -249,7 +259,7 @@ Q v = r * 1.0_i * conj(r);                              // ≈ (0,0,1,0)
 * Mixed-precision binary operators such as `quaternion<float> * quaternion<double>` are not provided, which matches `std::complex`. Convert one operand explicitly. The compound assignments do accept other precisions.
 * The standard forbids adding overloads to namespace `std`, so `std::get<I>(q)` written fully qualified does not compile. Use `quat::get`, ADL, or structured bindings.
 * The special functions lift a complex kernel in one argument. Every other parameter (an order, a degree, the modulus `k`, the Hurwitz `a`, the incomplete gamma/beta `a` and `b`) must be real.
-* **libc++ and `long double`.** libc++ 18/19 gives only double-precision `std::numbers` constants for `long double`, and it divides `complex<long double>` values in double precision. This library therefore carries its own constants and uses its own complex division (Smith's algorithm) in every kernel. One effect remains: on libc++, `long double` `asin`, `acos`, `asinh` and `acosh` are only as accurate as libc++'s own versions, about 1e-16. They are correct to a few ulp with libstdc++.
+* **libc++ and `long double`.** libc++ 18/19 gives only double-precision `std::numbers` constants for `long double`, and it divides `complex<long double>` values in double precision. Its `long double` complex `asin`, `acos`, `asinh` and `acosh` are good to only about 1e-16, and they overflow for huge arguments. This library therefore carries its own constants, its own complex division (Smith's algorithm), and its own inverse trigonometric and hyperbolic kernels. All of them are a few ulp on every library.
 * The transcendental functions are not `constexpr`, because `<cmath>` is not `constexpr` until C++26. All arithmetic, `norm`, `conj`, `inverse`, `dot`, `cross` and integer `pow` are `constexpr`.
 * No special IEEE handling of infinities and NaNs (C99 Annex G style) is done beyond `proj` and `abs`.
 * In a `std::format` spec, the width applies to each component, not to the whole quaternion.

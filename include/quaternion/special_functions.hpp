@@ -125,14 +125,203 @@ inline constexpr T stirling_shift = T(20);
 inline constexpr int stirling_terms = 16;
 inline constexpr long max_recurrence_shift = 4000;
 
-// ---- log-gamma ---------------------------------------------------------------
-// Uses Stirling's series after shifting upwards with Gamma(z) = Gamma(z+n) / prod(z+k).
-// The imaginary part is accumulated as a sum of principal logarithms, so the
-// result is the analytic continuation of log Gamma from the positive real axis
-// (the "loggamma" branch, continuous away from the cut along the negative real
-// axis).  Its real part is always log|Gamma(z)|.
+// ---- double-T ("double-double") arithmetic ---------------------------------------------
+// A value hi + lo with |lo| <= ulp(hi)/2, giving about twice the precision of T.  Used
+// where a result is an exponential of a large argument (Gamma, erfc, zeta), so that the
+// argument is carried with an absolute error far below ulp(1).  Products use std::fma.
 template <class T>
-[[nodiscard]] inline cplx<T> lgamma(cplx<T> z) noexcept {
+struct dd {
+    T hi{}, lo{};
+};
+template <class T>
+[[nodiscard]] inline dd<T> two_sum(T a, T b) noexcept {
+    const T s = a + b, bb = s - a;
+    return {s, (a - (s - bb)) + (b - bb)};
+}
+template <class T>
+[[nodiscard]] inline dd<T> fast_two_sum(T a, T b) noexcept {
+    const T s = a + b;
+    return {s, b - (s - a)};
+}
+template <class T>
+[[nodiscard]] inline dd<T> two_prod(T a, T b) noexcept {
+    const T p = a * b;
+    return {p, std::fma(a, b, -p)};
+}
+template <class T>
+[[nodiscard]] inline dd<T> operator-(const dd<T>& a) noexcept { return {-a.hi, -a.lo}; }
+template <class T>
+[[nodiscard]] inline dd<T> operator+(const dd<T>& a, const dd<T>& b) noexcept {
+    dd<T> s = two_sum(a.hi, b.hi);
+    s.lo += a.lo + b.lo;
+    return fast_two_sum(s.hi, s.lo);
+}
+template <class T>
+[[nodiscard]] inline dd<T> operator+(const dd<T>& a, T b) noexcept {
+    dd<T> s = two_sum(a.hi, b);
+    s.lo += a.lo;
+    return fast_two_sum(s.hi, s.lo);
+}
+template <class T>
+[[nodiscard]] inline dd<T> operator-(const dd<T>& a, const dd<T>& b) noexcept { return a + (-b); }
+template <class T>
+[[nodiscard]] inline dd<T> operator-(const dd<T>& a, T b) noexcept { return a + (-b); }
+template <class T>
+[[nodiscard]] inline dd<T> operator*(const dd<T>& a, const dd<T>& b) noexcept {
+    dd<T> p = two_prod(a.hi, b.hi);
+    p.lo += a.hi * b.lo + a.lo * b.hi;
+    return fast_two_sum(p.hi, p.lo);
+}
+template <class T>
+[[nodiscard]] inline dd<T> operator*(const dd<T>& a, T b) noexcept {
+    dd<T> p = two_prod(a.hi, b);
+    p.lo += a.lo * b;
+    return fast_two_sum(p.hi, p.lo);
+}
+template <class T>
+[[nodiscard]] inline dd<T> operator/(const dd<T>& a, const dd<T>& b) noexcept {
+    const T q1 = a.hi / b.hi;
+    dd<T> r = a - b * q1;
+    const T q2 = r.hi / b.hi;
+    r = r - b * q2;
+    const T q3 = r.hi / b.hi;
+    return fast_two_sum(q1, q2) + q3;
+}
+template <class T>
+[[nodiscard]] inline dd<T> ldexp(const dd<T>& a, int e) noexcept {
+    return {std::ldexp(a.hi, e), std::ldexp(a.lo, e)};
+}
+
+enum class ddc { ln2, pi, half_log_2pi, log_pi };
+// Constants split as hi + lo for 64-bit (x87) and 53-bit significands.
+template <class T>
+[[nodiscard]] inline dd<T> dd_const(ddc c) noexcept {
+    if constexpr (std::numeric_limits<T>::digits == 64) {
+        switch (c) {
+            case ddc::ln2: return {T(0x2c5c85fdf473de6bp-62L), T(-0xd871319ff0342543p-130L)};
+            case ddc::pi: return {T(0xc90fdaa22168c235p-62L), T(-0xece675d1fc8f8cbbp-128L)};
+            case ddc::half_log_2pi: return {T(0xeb3f8e4325f5a535p-64L), T(-0x1ad0dbffaef9b7f7p-126L)};
+            case ddc::log_pi: return {T(0x928682473d0de85fp-63L), T(-0x140d5272af7816cdp-125L)};
+        }
+    } else if constexpr (std::numeric_limits<T>::digits == 53) {
+        switch (c) {
+            case ddc::ln2: return {T(0x1.62e42fefa39efp-1), T(0x1.abc9e3b39803fp-56)};
+            case ddc::pi: return {T(0x1.921fb54442d18p+1), T(0x1.1a62633145c07p-53)};
+            case ddc::half_log_2pi: return {T(0x1.d67f1c864beb5p-1), T(-0x1.65b5a1b7ff5dfp-55)};
+            case ddc::log_pi: return {T(0x1.250d048e7a1bdp+0), T(0x1.7abf2ad8d5088p-57)};
+        }
+    }
+    // Other formats: no extra precision.
+    switch (c) {
+        case ddc::ln2: return {std::log(T(2)), T()};
+        case ddc::pi: return {pi<T>, T()};
+        case ddc::half_log_2pi: return {T(0.5) * std::log(T(2) * pi<T>), T()};
+        default: return {std::log(pi<T>), T()};
+    }
+}
+
+// exp of a double-T value: 2^k reduction, a further 2^-8 scaling, Taylor series for
+// expm1, then eight squarings of 1 + expm1.
+template <class T>
+[[nodiscard]] inline dd<T> exp_dd(const dd<T>& x) noexcept {
+    if (std::isnan(x.hi)) return {x.hi, T()};
+    if (x.hi > std::log(std::numeric_limits<T>::max())) return {std::numeric_limits<T>::infinity(), T()};
+    if (x.hi < std::log(std::numeric_limits<T>::denorm_min()) - T(1)) return {};
+    const dd<T> ln2 = dd_const<T>(ddc::ln2);
+    const T k = std::nearbyint(x.hi / ln2.hi);
+    const dd<T> r = ldexp(x - ln2 * k, -8);
+    dd<T> s = r, t = r;
+    for (int i = 2; i <= 14; ++i) {
+        t = t * r / dd<T>{T(i), T()};
+        s = s + t;
+    }
+    for (int i = 0; i < 8; ++i) s = s * (s + T(2));
+    return ldexp(s + T(1), static_cast<int>(k));
+}
+// log of a positive double-T value by Newton's method on exp_dd.
+template <class T>
+[[nodiscard]] inline dd<T> log_dd(const dd<T>& x) noexcept {
+    dd<T> y{std::log(x.hi), T()};
+    for (int i = 0; i < 2; ++i) y = y + x * exp_dd(-y) - T(1);
+    return y;
+}
+// sin and cos of a real T value with |a| <= 4, to double-T precision.
+template <class T>
+inline void sincos_dd(T a, dd<T>& s, dd<T>& c) noexcept {
+    const dd<T> pio2 = ldexp(dd_const<T>(ddc::pi), -1);
+    const T j = std::nearbyint(a / pio2.hi);
+    const dd<T> r = dd<T>{a, T()} - pio2 * j;
+    const dd<T> r2 = r * r;
+    dd<T> ts = r, tc{T(1), T()};
+    s = ts;
+    c = tc;
+    for (int i = 1; i <= 16; ++i) {
+        ts = -(ts * r2) / dd<T>{T((2 * i) * (2 * i + 1)), T()};
+        tc = -(tc * r2) / dd<T>{T((2 * i - 1) * (2 * i)), T()};
+        s = s + ts;
+        c = c + tc;
+    }
+    const int q = static_cast<int>(j) & 3;
+    const dd<T> s0 = s, c0 = c;
+    if (q == 1) s = c0, c = -s0;
+    else if (q == 2) s = -s0, c = -c0;
+    else if (q == 3) s = -c0, c = s0;
+}
+
+template <class T>
+struct cdd {
+    dd<T> re, im;
+};
+template <class T>
+[[nodiscard]] inline cdd<T> operator+(const cdd<T>& a, const cdd<T>& b) noexcept {
+    return {a.re + b.re, a.im + b.im};
+}
+template <class T>
+[[nodiscard]] inline cdd<T> operator-(const cdd<T>& a, const cdd<T>& b) noexcept {
+    return {a.re - b.re, a.im - b.im};
+}
+template <class T>
+[[nodiscard]] inline cdd<T> operator*(const cdd<T>& a, const cdd<T>& b) noexcept {
+    return {a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re};
+}
+template <class T>
+[[nodiscard]] inline cdd<T> operator*(const cdd<T>& a, const dd<T>& b) noexcept {
+    return {a.re * b, a.im * b};
+}
+template <class T>
+[[nodiscard]] inline cdd<T> to_cdd(const cplx<T>& z) noexcept {
+    return {{z.real(), T()}, {z.imag(), T()}};
+}
+template <class T>
+[[nodiscard]] inline cplx<T> to_cplx(const cdd<T>& z) noexcept {
+    return {z.re.hi, z.im.hi};
+}
+// exp(hi + lo) = exp(hi) (1 + lo) for a double-T exponent.
+template <class T>
+[[nodiscard]] inline cplx<T> exp_split(const cdd<T>& e) noexcept {
+    const cplx<T> h = std::exp(cplx<T>(e.re.hi, e.im.hi));
+    const T lr = e.re.lo, li = e.im.lo;
+    return {h.real() * (T(1) + lr) - h.imag() * li, h.imag() * (T(1) + lr) + h.real() * li};
+}
+// Principal log of x + i y (x, y double-T) to double-T precision.
+template <class T>
+[[nodiscard]] inline cdd<T> clog_dd(const dd<T>& x, const dd<T>& y) noexcept {
+    const T m = std::max(std::abs(x.hi), std::abs(y.hi));
+    const int e = std::ilogb(m);
+    const dd<T> xs = ldexp(x, -e), ys = ldexp(y, -e);
+    const dd<T> r2 = xs * xs + ys * ys;
+    const dd<T> re = ldexp(log_dd(r2), -1) + dd_const<T>(ddc::ln2) * T(e);
+    const T t0 = std::atan2(y.hi, x.hi);
+    dd<T> s, c;
+    sincos_dd(t0, s, c);
+    // tan(theta - t0) = (y cos t0 - x sin t0) / (x cos t0 + y sin t0)
+    const dd<T> d = (ys * c - xs * s) / (xs * c + ys * s);
+    return {re, dd<T>{t0, T()} + d};
+}
+
+// Plain T evaluation, used only for |z| > 1e30 where double-T products could overflow.
+template <class T>
+[[nodiscard]] inline cplx<T> lgamma_plain(cplx<T> z) noexcept {
     if (is_nonpositive_integer(z)) return {std::numeric_limits<T>::infinity(), T()};
     if (std::isnan(z.real()) || std::isnan(z.imag())) return {nan<T>(), nan<T>()};
     cplx<T> shift_sum{};
@@ -141,7 +330,7 @@ template <class T>
         if (need > T(max_recurrence_shift)) {
             // Far left half-plane: reflection (the imaginary part may differ from
             // the continuous branch by a multiple of 2*pi).
-            return std::log(pi<T>) - std::log(sinpi(z)) - lgamma(cplx<T>(T(1)) - z);
+            return std::log(pi<T>) - std::log(sinpi(z)) - lgamma_plain(cplx<T>(T(1)) - z);
         }
         const long n = static_cast<long>(need);
         for (long k = 0; k < n; ++k) shift_sum += std::log(z + T(k));
@@ -157,18 +346,111 @@ template <class T>
     return (z - T(0.5)) * std::log(z) - z + half_log_2pi + series - shift_sum;
 }
 
+// ---- log-gamma ---------------------------------------------------------------
+// Uses Stirling's series after shifting upwards with Gamma(z) = Gamma(z+n) / prod(z+k).
+// The imaginary part is accumulated as a sum of principal logarithms, so the
+// result is the analytic continuation of log Gamma from the positive real axis
+// (the "loggamma" branch, continuous away from the cut along the negative real
+// axis).  Its real part is always log|Gamma(z)|.
+//
+// lgamma_dd evaluates this in double-T arithmetic (the shifted argument, the logs and
+// (z - 1/2) log z - z are carried as hi + lo; only the small Stirling correction is in
+// T), so exp(lgamma) loses no accuracy to the size of log Gamma.  The real part of the
+// argument is double-T as well, so that 1 - z is exact in the reflection formula.
+template <class T>
+[[nodiscard]] inline cdd<T> lgamma_dd(dd<T> x, T y) noexcept {
+    const dd<T> yd{y, T()};
+    cdd<T> shift_sum{};
+    if (x.hi < stirling_shift<T>) {
+        const long n = static_cast<long>(std::ceil(stirling_shift<T> - x.hi));
+        for (long k = 0; k < n; ++k) shift_sum = shift_sum + clog_dd(x + T(k), yd);
+        x = x + T(n);
+    }
+    const cplx<T> z(x.hi, y);
+    const cplx<T> inv = cdiv(T(1), z), inv2 = inv * inv;
+    cplx<T> series{}, p = inv;
+    for (int k = 1; k <= stirling_terms; ++k) {
+        series += bernoulli_2k<T>(k) / T(2 * k * (2 * k - 1)) * p;
+        p *= inv2;
+    }
+    const cdd<T> lz = clog_dd(x, yd);
+    const cdd<T> zmh{x - T(0.5), yd};
+    cdd<T> r = zmh * lz - cdd<T>{x, yd};
+    r.re = r.re + dd_const<T>(ddc::half_log_2pi);
+    r = r + to_cdd(series) - shift_sum;
+    return r;
+}
+
+// sin(pi z) = exp(E) * P with E real double-T, so that sin(pi z) can be used in log
+// form for large |Im z| without overflow:
+//   sin(pi z) = e^{pi |y|} e^{-+ i pi x} (w - 1) (-+ i/2),  w = e^{+-2 pi i x} e^{-2 pi |y|}.
+template <class T>
+struct sinpi_exp {
+    dd<T> E;
+    cplx<T> P;
+};
+template <class T>
+[[nodiscard]] inline sinpi_exp<T> sinpi_split(const cplx<T>& z) noexcept {
+    const T x = z.real(), y = z.imag();
+    if (std::abs(y) <= T(1)) return {{}, sinpi(z)};
+    const T ay = std::abs(y);
+    const T ew = std::exp(T(-2) * pi<T> * ay);
+    const cplx<T> w(ew * cospi(T(2) * x), ew * sinpi(T(2) * x));
+    const cplx<T> ph(cospi(x), -sinpi(x));  // e^{-i pi x}
+    cplx<T> P = ph * (w - T(1)) * cplx<T>(T(), T(-0.5));
+    if (y < T()) P = std::conj(P);
+    return {dd_const<T>(ddc::pi) * ay, P};
+}
+
+// Reflection for Re z far below zero, where the upward shift would be too long:
+//   log Gamma(z) = log pi - log sin(pi z) - log Gamma(1 - z) + 2 pi i m.
+// The integer m restoring the continuous branch is found from Stirling's formula
+// S(z) = (z - 1/2) log z - z + log(2 pi)/2, whose imaginary part differs from the true
+// one by the imaginary part of -log(1 - e^{2 pi i z}), which is below pi/2 in size.
+template <class T>
+[[nodiscard]] inline cplx<T> lgamma_reflect(cplx<T> z) noexcept {
+    const bool lower = z.imag() < T() || (z.imag() == T() && std::signbit(z.imag()));
+    if (lower) z = {z.real(), -z.imag()};
+    const sinpi_exp<T> sp = sinpi_split(z);
+    const cdd<T> lg1 = lgamma_dd(two_sum(T(1), -z.real()), -z.imag());
+    const cplx<T> ls = sp.E.hi + std::log(sp.P);
+    const cplx<T> R = cplx<T>(std::log(pi<T>) - lg1.re.hi, -lg1.im.hi) - ls;
+    const cplx<T> S = (z - T(0.5)) * std::log(z) - z;
+    const T m = std::nearbyint((S.imag() - R.imag()) / (T(2) * pi<T>));
+    const dd<T> im = dd<T>{-lg1.im.hi, -lg1.im.lo} - dd<T>{ls.imag(), T()} +
+                     dd_const<T>(ddc::pi) * (T(2) * m);
+    const cplx<T> res(R.real(), im.hi);
+    return lower ? std::conj(res) : res;
+}
+
+template <class T>
+[[nodiscard]] inline cplx<T> lgamma(const cplx<T>& z) noexcept {
+    if (is_nonpositive_integer(z)) return {std::numeric_limits<T>::infinity(), T()};
+    if (std::isnan(z.real()) || std::isnan(z.imag())) return {nan<T>(), nan<T>()};
+    if (std::abs(z) > T(1e30)) return lgamma_plain(z);
+    if (z.real() < stirling_shift<T> &&
+        std::ceil(stirling_shift<T> - z.real()) > T(max_recurrence_shift))
+        return lgamma_reflect(z);
+    return to_cplx(lgamma_dd(dd<T>{z.real(), T()}, z.imag()));
+}
+
 // ---- gamma -------------------------------------------------------------------
+// Gamma(z) = exp(log Gamma(z)) with log Gamma in double-T, so the only error growth with
+// |z| is the inherent conditioning |z psi(z)| eps of the argument itself.  Re z < 1/2
+// uses Gamma(z) = pi / (sin(pi z) Gamma(1 - z)) with sin(pi z) in split exponential form.
 template <class T>
 [[nodiscard]] inline cplx<T> tgamma(const cplx<T>& z) noexcept {
     if (is_nonpositive_integer(z)) {
         if (z.real() == T()) return {std::copysign(std::numeric_limits<T>::infinity(), z.real()), T()};
         return {nan<T>(), T()};
     }
-    if (z.real() < T(0.5)) {
-        // Reflection: Gamma(z) Gamma(1-z) = pi / sin(pi z).
-        return cdiv(pi<T>, sinpi(z) * tgamma(cplx<T>(T(1)) - z));
-    }
-    return std::exp(lgamma(z));
+    if (std::isnan(z.real()) || std::isnan(z.imag())) return {nan<T>(), nan<T>()};
+    if (std::abs(z) > T(1e30)) return std::exp(lgamma(z));
+    if (z.real() >= T(0.5)) return exp_split(lgamma_dd(dd<T>{z.real(), T()}, z.imag()));
+    const sinpi_exp<T> sp = sinpi_split(z);
+    const cdd<T> lg1 = lgamma_dd(two_sum(T(1), -z.real()), -z.imag());
+    cdd<T> e{dd_const<T>(ddc::log_pi) - lg1.re - sp.E, -lg1.im};
+    return cdiv(exp_split(e), sp.P);
 }
 
 // ---- digamma -----------------------------------------------------------------
@@ -218,18 +500,34 @@ template <class T>
 
 // ---- error functions -------------------------------------------------------------
 // Maclaurin series of erf.  Used for |Re z| < 1/2, where the relative cancellation
-// is bounded by about exp(2 Re(z)^2) < e.
+// is bounded by about exp(2 Re(z)^2) < e.  For large |Im z| the series has ~e|z|^2
+// terms, so z^2, the terms and the sum are carried in double-T; otherwise the
+// rounding of z^2 and of each term would accumulate to ~|z|^2 eps.
 template <class T>
 [[nodiscard]] inline cplx<T> erf_series(const cplx<T>& z) noexcept {
-    const cplx<T> z2 = z * z;
-    cplx<T> term = z, sum = z;
+    const T x = z.real(), y = z.imag();
+    const cdd<T> mw{-(two_prod(x, x) - two_prod(y, y)), -(two_prod(x, y) * T(2))};
+    cdd<T> term = to_cdd(z), sum = term;
     for (int n = 1; n < 200000; ++n) {
-        term *= -z2 / T(n);
-        const cplx<T> t = term / T(2 * n + 1);
-        sum += t;
-        if (std::abs(t) <= eps<T>() * std::abs(sum) / 4) break;
+        term = term * mw;
+        const dd<T> inv = dd<T>{T(1), T()} / dd<T>{T(n), T()};
+        term = term * inv;
+        const dd<T> inv2 = dd<T>{T(1), T()} / dd<T>{T(2 * n + 1), T()};
+        const cdd<T> t = term * inv2;
+        sum = sum + t;
+        if (std::hypot(t.re.hi, t.im.hi) <= eps<T>() * eps<T>() * std::hypot(sum.re.hi, sum.im.hi)) break;
     }
-    return sum * (T(2) / std::sqrt(pi<T>));
+    return to_cplx(sum) * (T(2) / std::sqrt(pi<T>));
+}
+// exp(-z^2) with z^2 = (x^2 - y^2) + 2ixy formed exactly in double-T (fma products), so
+// that a large |z|^2 does not amplify the rounding of z^2 itself.
+template <class T>
+[[nodiscard]] inline cplx<T> exp_neg_sq(const cplx<T>& z) noexcept {
+    const T x = z.real(), y = z.imag();
+    const dd<T> re = two_prod(x, x) - two_prod(y, y);
+    const dd<T> im = two_prod(x, y) * T(2);
+    if (!std::isfinite(re.hi) || !std::isfinite(im.hi)) return std::exp(-z * z);
+    return exp_split(cdd<T>{-re, -im});
 }
 // Continued fraction (Laplace/Legendre) for Re z > 0:
 //   erfc z = exp(-z^2)/sqrt(pi) * 1/(z + (1/2)/(z + 1/(z + (3/2)/(z + ...))))
@@ -250,7 +548,7 @@ template <class T>
         f *= delta;
         if (std::abs(delta - T(1)) <= eps<T>() / 2) break;
     }
-    return cdiv(std::exp(-z * z), std::sqrt(pi<T>) * f);
+    return cdiv(exp_neg_sq(z), std::sqrt(pi<T>) * f);
 }
 template <class T>
 [[nodiscard]] inline cplx<T> erf(const cplx<T>& z) noexcept {
@@ -285,9 +583,16 @@ template <class T>
     }
     if (s.real() < T(0.5)) {
         // zeta(s) = 2^s pi^(s-1) sin(pi s/2) Gamma(1-s) zeta(1-s), in log form to avoid overflow.
+        // The exponent is formed in double-T and sin(pi s/2) in split form, so neither
+        // the phase |Im s| log|s| nor e^{pi |Im s|/2} costs accuracy or overflows.
         const cplx<T> one_minus_s = cplx<T>(T(1)) - s;
-        const cplx<T> lg = s * std::log(T(2)) + (s - T(1)) * std::log(pi<T>) + lgamma(one_minus_s);
-        return std::exp(lg) * sinpi(s / T(2)) * riemann_zeta(one_minus_s);
+        const dd<T> ln2 = dd_const<T>(ddc::ln2), lnpi = dd_const<T>(ddc::log_pi);
+        const dd<T> sm1 = two_sum(s.real(), T(-1));
+        const cdd<T> lg1 = lgamma_dd(two_sum(T(1), -s.real()), -s.imag());
+        const sinpi_exp<T> sp = sinpi_split(s / T(2));
+        const cdd<T> e{ln2 * s.real() + lnpi * sm1 + lg1.re + sp.E,
+                       ln2 * s.imag() + lnpi * s.imag() + lg1.im};
+        return exp_split(e) * sp.P * riemann_zeta(one_minus_s);
     }
     const T t = std::abs(s.imag());
     const T target = T(std::numeric_limits<T>::digits) * std::log(T(2)) + T(3);
@@ -312,12 +617,21 @@ template <class T>
         const L dn = d[static_cast<std::size_t>(n)];
         for (long k = 0; k < n; ++k) {
             const T coeff = static_cast<T>((dn - d[static_cast<std::size_t>(k)]) / dn);
-            const cplx<T> term = coeff * std::exp(-s * std::log(T(k + 1)));
+            // (k+1)^{-s} with log(k+1) in double-T: the phase Im(s) log(k+1) is large.
+            const dd<T> lk = log_dd(dd<T>{T(k + 1), T()});
+            const cplx<T> term = coeff * exp_split(cdd<T>{-(lk * s.real()), -(lk * s.imag())});
             eta += (k % 2 == 0) ? term : -term;
         }
     }
     // 1 - 2^(1-s) = -expm1((1-s) ln 2), accurate near s = 1.
-    const cplx<T> denom = -expm1((cplx<T>(T(1)) - s) * std::log(T(2)));
+    cplx<T> denom;
+    if (std::abs(s - T(1)) < T(1)) {
+        denom = -expm1((cplx<T>(T(1)) - s) * std::log(T(2)));
+    } else {
+        const dd<T> ln2 = dd_const<T>(ddc::ln2);
+        denom = T(1) - exp_split(cdd<T>{ln2 * two_sum(T(1), -s.real()).hi + ln2 * two_sum(T(1), -s.real()).lo,
+                                        -(ln2 * s.imag())});
+    }
     return cdiv(eta, denom);
 }
 
@@ -382,10 +696,95 @@ template <class T>
 
 // std::acos with an exact pi/2 at zero (libc++ 19 returns a double-precision pi/2
 // for complex<long double> there).
+// asin and acos by the algorithm of Hull, Fairgrieve and Tang (ACM TOMS 23, 1997),
+// accurate to a few ulp everywhere, including near the branch points +-1 and for huge
+// or tiny arguments.  (libc++'s complex<long double> versions are only good to about
+// double precision.)  The kernel works on x, y >= 0; the signs are restored with the
+// C99 symmetries, so signed zeros select the side of the cuts.
+template <class T>
+inline void asin_acos_kernel(T x, T y, T& asin_re, T& acos_re, T& im) noexcept {
+    const T safe_max = std::sqrt(std::numeric_limits<T>::max()) / T(8);
+    const T safe_min = std::sqrt(std::numeric_limits<T>::min()) * T(4);
+    if (y == T() && x <= T(1)) {
+        asin_re = std::asin(x);
+        acos_re = std::acos(x);
+        im = T();
+        return;
+    }
+    if (x > safe_max || y > safe_max) {
+        // asin z ~ -i log(2 i z): error O(1/|z|^2), far below eps here.
+        asin_re = std::atan2(x, y);
+        acos_re = std::atan2(y, x);
+        const T m = std::max(x, y), n = std::min(x, y), q = n / m;
+        im = std::log(m) + std::log(T(2)) + T(0.5) * std::log1p(q * q);
+        return;
+    }
+    if (x < safe_min && y < safe_min) {
+        asin_re = x;
+        acos_re = pi<T> / T(2) - x;
+        im = y;
+        return;
+    }
+    const T a_cross = T(1.5), b_cross = T(0.6417);
+    const T xp1 = x + T(1), xm1 = x - T(1);
+    const T r = std::hypot(xp1, y), s = std::hypot(xm1, y);
+    const T A = (r + s) / T(2), B = x / A;
+    // Real parts.
+    if (B <= b_cross) {
+        asin_re = std::asin(B);
+        acos_re = std::acos(B);
+    } else if (x <= T(1)) {
+        const T d = std::sqrt(T(0.5) * (A + x) * (y * (y / (r + xp1)) + (s - xm1)));
+        asin_re = std::atan(x / d);
+        acos_re = std::atan(d / x);
+    } else {
+        const T h = T(0.5) * ((A + x) / (r + xp1) + (A + x) / (s + xm1));
+        const T d = y * std::sqrt(h);
+        asin_re = std::atan(x / d);
+        acos_re = std::atan(d / x);
+    }
+    // Imaginary part (of asin; acos has the opposite sign).
+    if (A <= a_cross) {
+        T am1, sq;
+        if (x < T(1)) {
+            // sqrt(Am1) = y sqrt((1/(r+xp1) + 1/(s-xm1))/2), formed without y^2.
+            const T sa = y * std::sqrt(T(0.5) * (T(1) / (r + xp1) + T(1) / (s - xm1)));
+            am1 = sa * sa;
+            sq = sa * std::sqrt(A + T(1));
+        } else {
+            am1 = T(0.5) * (y * (y / (r + xp1)) + (s + xm1));
+            sq = std::sqrt(am1 * (A + T(1)));
+        }
+        im = std::log1p(am1 + sq);
+    } else {
+        im = std::log(A + std::sqrt(A * A - T(1)));
+    }
+}
+template <class T>
+[[nodiscard]] inline cplx<T> asin(const cplx<T>& z) noexcept {
+    if (!std::isfinite(z.real()) || !std::isfinite(z.imag())) return std::asin(z);
+    T ar, cr, im;
+    asin_acos_kernel(std::abs(z.real()), std::abs(z.imag()), ar, cr, im);
+    return {std::copysign(ar, z.real()), std::copysign(im, z.imag())};
+}
 template <class T>
 [[nodiscard]] inline cplx<T> acos(const cplx<T>& z) noexcept {
-    if (z.real() == T() && z.imag() == T()) return {pi<T> / T(2), -z.imag()};
-    return std::acos(z);
+    if (!std::isfinite(z.real()) || !std::isfinite(z.imag())) return std::acos(z);
+    T ar, cr, im;
+    asin_acos_kernel(std::abs(z.real()), std::abs(z.imag()), ar, cr, im);
+    return {std::signbit(z.real()) ? pi<T> - cr : cr, std::signbit(z.imag()) ? im : -im};
+}
+// asinh z = -i asin(i z);  acosh z = +-i acos z with Re >= 0.
+template <class T>
+[[nodiscard]] inline cplx<T> asinh(const cplx<T>& z) noexcept {
+    const cplx<T> w = sf::asin(cplx<T>(-z.imag(), z.real()));
+    return {w.imag(), -w.real()};
+}
+template <class T>
+[[nodiscard]] inline cplx<T> acosh(const cplx<T>& z) noexcept {
+    if (!std::isfinite(z.real()) || !std::isfinite(z.imag())) return std::acosh(z);
+    const cplx<T> w = sf::acos(z);
+    return {std::abs(w.imag()), std::copysign(w.real(), z.imag())};
 }
 
 // atanh and atan with the C99/std::complex branch cuts, written in terms of log1p
@@ -1390,42 +1789,73 @@ template <class T>
         if (a > T()) return {std::tgamma(a), T()};
         return {std::numeric_limits<T>::infinity(), T()};
     }
-    if (a > T()) return gamma_pq(a, z).q * std::tgamma(a);
-    if (!is_integer(a)) {
-        if (std::abs(z) > T(2) && std::abs(std::arg(z)) < T(0.9) * pi<T>) return gamma_cf(a, z);
-        if (a - std::floor(a) > T(1e-3) && std::ceil(a) - a > T(1e-3)) {
-            // Gamma(a, z) = Gamma(a) - z^a sum (-z)^k / (k! (a+k))
-            cplx<T> term(T(1)), sum(T(1) / a);
-            const T r = std::abs(z);
-            for (int k = 1; k < 1000000; ++k) {
-                term *= -z / T(k);
-                const cplx<T> t = term / (a + T(k));
-                sum += t;
-                if (T(k) > r && std::abs(t) <= eps<T>() * std::abs(sum) / 4) break;
+    // Small positive a joins the near-pole path below (Q(a, z) Gamma(a) cancels there).
+    if (a > T(0.5)) return gamma_pq(a, z).q * std::tgamma(a);
+    {
+        if (const T az = std::abs(z), ag = std::abs(std::arg(z));
+            (az > T(2) && ag < T(0.75) * pi<T>) || (az > T(10) && ag < T(0.9) * pi<T>))
+            return gamma_cf(a, z);
+        // Series Gamma(a, z) = Gamma(a) - z^a sum_k (-z)^k / (k! (a+k)), written around the
+        // nearest pole a = -n + delta (|delta| <= 1/2).  Gamma(a) and the k = n term
+        // both have a pole at delta = 0; combined analytically,
+        //   Gamma(a) - z^a (-z)^n / (n! (a+n))
+        //     = (-1)^n / n! * [expm1(log f) - expm1(delta log z)] / delta,
+        //   f = Gamma(1+delta) / prod_{m=1..n} (1 - delta/m),
+        // so no cancellation occurs (the old downward recurrence lost |z|^n-fold).  At
+        // delta = 0 (a a non-positive integer) the bracket is H_n - gamma - log z.
+        const T nn = std::nearbyint(-a), delta = a + nn;
+        const long n = static_cast<long>(nn);
+        const cplx<T> lz = std::log(z);
+        static constexpr long double zeta_k[] = {
+            1.6449340668482264365L, 1.2020569031595942854L, 1.0823232337111381915L,
+            1.0369277551433699263L, 1.0173430619844491397L, 1.0083492773819228268L,
+            1.0040773561979443394L, 1.0020083928260822144L, 1.0009945751278180853L};
+        const T euler_gamma = T(0.57721566490153286060651209L);
+        // log Gamma(1 + delta) = -gamma delta + sum_{k>=2} (-1)^k zeta(k) delta^k / k
+        // (zeta(k) for k > 10 from its first five terms; |delta| <= 0.1 makes the
+        // truncation negligible.)
+        T lf = -euler_gamma * delta, dk = -delta;
+        if (std::abs(delta) > T(0.1)) {
+            lf = std::lgamma(T(1) + delta);  // the division by delta costs little here
+        } else {
+            for (int k = 2; k <= 24; ++k) {
+                dk *= -delta;
+                T zk;
+                if (k <= 10) {
+                    zk = T(zeta_k[k - 2]);
+                } else {
+                    zk = T(1);
+                    for (int j = 2; j <= 5; ++j) zk += std::pow(T(j), T(-k));
+                }
+                lf += zk * dk / T(k);
             }
-            return std::tgamma(a) - std::exp(a * std::log(z)) * sum;
         }
-        // a within 1e-3 of a negative integer: Gamma(a, z) = (Gamma(a+1, z) - z^a e^{-z}) / a
-        // applied downwards from a + n > 0.
-        const long n = static_cast<long>(std::ceil(-a));
-        T b = a + T(n);
-        cplx<T> g = (b > T()) ? gamma_pq(b, z).q * std::tgamma(b) : expint_e1(z);
-        for (long i = 0; i < n; ++i) {
-            b -= T(1);
-            g = (g - std::exp(b * std::log(z) - z)) / b;
+        T hn = T();
+        for (long m = 1; m <= n; ++m) {
+            lf -= std::log1p(-delta / T(m));
+            hn += T(1) / T(m);
         }
-        return g;
+        cplx<T> head;
+        if (delta == T()) {
+            head = (hn - euler_gamma) - lz;
+        } else {
+            head = (std::expm1(lf) - expm1(delta * lz)) / delta;
+        }
+        T nf = T(1);
+        for (long m = 2; m <= n; ++m) nf *= T(m);
+        head *= ((n % 2) ? T(-1) : T(1)) / nf;
+        // Remaining series terms k != n.
+        cplx<T> term(T(1)), sum(n == 0 ? T() : T(1) / a);
+        const T r = std::abs(z);
+        for (long k = 1; k < 1000000; ++k) {
+            term *= -z / T(k);
+            if (k == n) continue;
+            const cplx<T> t = term / (a + T(k));
+            sum += t;
+            if (T(k) > r && k > n && std::abs(t) <= eps<T>() * std::abs(sum) / 4) break;
+        }
+        return head - std::exp(a * lz) * sum;
     }
-    // a = 0, -1, -2, ...: start from Gamma(0, z) = E1(z).
-    const long n = static_cast<long>(-a);
-    if (std::abs(z) > T(2) && std::abs(std::arg(z)) < T(0.9) * pi<T>) return gamma_cf(a, z);
-    cplx<T> g = expint_e1(z);
-    T b = T();
-    for (long i = 0; i < n; ++i) {
-        b -= T(1);
-        g = (g - std::exp(b * std::log(z) - z)) / b;
-    }
-    return g;
 }
 template <class T>
 [[nodiscard]] inline cplx<T> gamma_lower(T a, const cplx<T>& z) {
@@ -1502,11 +1932,11 @@ template <class T, class F>
     }
 
 // Inverse trigonometric and hyperbolic functions (std::complex branch cuts).
-QUAT_SF_LIFT(asin, std::asin(z), false)
+QUAT_SF_LIFT(asin, detail::sf::asin(z), false)
 QUAT_SF_LIFT(acos, detail::sf::acos(z), false)
 QUAT_SF_LIFT(atan, detail::sf::atan(z), false)
-QUAT_SF_LIFT(asinh, std::asinh(z), false)
-QUAT_SF_LIFT(acosh, std::acosh(z), false)
+QUAT_SF_LIFT(asinh, detail::sf::asinh(z), false)
+QUAT_SF_LIFT(acosh, detail::sf::acosh(z), false)
 QUAT_SF_LIFT(atanh, detail::sf::atanh(z), false)
 
 // Elementary functions with good accuracy near zero.
