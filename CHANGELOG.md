@@ -2,6 +2,53 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## Benchmarks; faster Bessel (large |z|, large ν) and ζ (large |Im s|)
+
+* **Benchmark suite.** `bench/bench.cpp` (CMake option `QUATERNION_BUILD_BENCHMARKS`, default OFF) is self-contained, with no dependencies. CI runs it in a non-gating job and uploads `benchmark-results` (`bench.json`, `bench.txt`).
+* **Bessel functions.**
+  * Hankel's asymptotic expansion is used for K, H⁽¹⁾, H⁽²⁾, J, Y and I at |z| ≥ 8–16, wherever its terms reach ε/4 while decreasing.
+  * For ν ≥ 2, K is recurred upward from frac(ν) (Temme).
+  * Integer-order J uses the expansion for |z| ≥ 16 when n² < |z|.
+* **ζ.**
+  * The Euler–Maclaurin sum uses N = 0.3|s| + 30 (was 0.6|s| + 20), with up to 80 Bernoulli corrections (B₂ⱼ/(2j)! via ζ(2j) for j > 20).
+  * log k comes from a prime sieve in double-length arithmetic, so only primes need a logarithm.
+  * Riemann–Siegel was not used: with the few correction terms that are practical for general complex s, it cannot reach ulp accuracy at |Im s| ≲ 10⁶.
+
+Timings, before → after, in ns per call. Measured with GCC 14 -O2 on x86-64, quaternion arguments on a rotated axis:
+
+| case | double | long double |
+|---|---|---|
+| J_2.5, \|z\| ≈ 30 | 25,071 → 404 (62×) | 141,714 → 2,007 (71×) |
+| J_2.5, \|z\| ≈ 3000 | 38,161 → 421 (91×) | 208,242 → 2,710 (77×) |
+| J_3 (integer), \|z\| ≈ 3000 | 46,636 → 594 (79×) | 282,786 → 4,016 (70×) |
+| Y_1.5, \|z\| ≈ 300 | 30,541 → 422 (72×) | 162,379 → 2,552 (64×) |
+| K_0.5, \|z\| ≈ 300 | 17,147 → 231 (74×) | 97,534 → 1,485 (66×) |
+| I_1.5, \|z\| ≈ 300 | 33,026 → 243 (136×) | 164,481 → 1,398 (118×) |
+| J_50, \|z\| ≈ 30 | 39,134 → 1,489 (26×) | 202,294 → 7,135 (28×) |
+| J_200, \|z\| ≈ 300 | 248,090 → 2,959 (84×) | 1,107,100 → 12,283 (90×) |
+| K_100, \|z\| ≈ 30 | 58,099 → 1,097 (53×) | 336,964 → 4,683 (72×) |
+| J_2.5, \|z\| ≈ 2 (unchanged path) | 25,761 → 25,063 | 147,984 → 140,533 |
+| ζ(½ + i·10²) | 151,127 → 43,302 (3.5×) | 3.40 ms → 0.99 ms (3.4×) |
+| ζ(½ + i·10³) | 1.23 ms → 0.156 ms (7.9×) | 27.4 ms → 3.5 ms (7.8×) |
+| ζ(½ + i·10⁴) | 11.8 ms → 1.01 ms (11.7×) | 215 ms → 23.1 ms (9.3×) |
+| ζ(½ + i·10⁵) | 94.6 ms → 8.06 ms (11.7×) | 2108 ms → 138 ms (15×) |
+
+Accuracy against mpmath (worst / p99 / median ulp, before → after, 100–150 random exact inputs per row; double, then long double). The Bessel rows all improve; ζ is unchanged within sampling noise (its long double worst case moves from 10.4 to 11 ulp):
+
+| region | double | long double |
+|---|---|---|
+| J_ν, \|ν\| ≤ 3, 16 ≤ \|z\| ≤ 3000 | 720/411/5.8 → 7.1/4.5/1.7 | 4920/1170/6.2 → 18/5.6/1.8 |
+| J_n, n ≤ 10, 16 ≤ \|z\| ≤ 3000 | 486/393/1.8 → 56/7.5/1.4 | 22300/561/1.7 → 38/8.3/1.4 |
+| Y_ν, \|ν\| ≤ 3, large \|z\| | 4940/1990/5.8 → 15/9.3/1.8 | 1350/859/6.7 → 7.7/4.7/1.6 |
+| K_ν, ν ≤ 3, large \|z\| | 561/233/2.8 → 6.3/5.8/1.5 | 195/60/2.8 → 5.9/5.5/1.8 |
+| I_ν, ν ≤ 3, large \|z\| | 779/757/5.6 → 5.4/3.8/1.5 | 1300/126/4.7 → 16/8.7/1.6 |
+| J_ν, 20 ≤ ν ≤ 250, \|z\| ≤ 400 | 1.2e15/4.3e8/376 → 649/272/44 | 4.4e9/5.4e8/419 → 242/201/61 |
+| Y_ν, same | 6.5e15/8.9e12/346 → 294/239/41 | 2.4e15/3.6e9/324 → 325/227/35 |
+| K_ν, same | 1.7e12/6.5e4/281 → 190/182/27 | 2.1e7/7.2e5/251 → 272/253/47 |
+| I_ν, same | 7.5e9/6.4e3/318 → 433/219/33 | 8.8e12/3.2e6/347 → 524/229/50 |
+| J_ν, K_ν, \|z\| ≤ 16 | unchanged | unchanged |
+| ζ, 2 ≤ \|Im s\| ≤ 10⁵, −2 ≤ Re s ≤ 3 | 16.6/4.3/0.87 → 14.2/4.3/0.91 | 10.4/3.4/0.65 → 11/3.4/0.65 |
+
 ## C Annex G infinities, NaNs and signed zeros
 
 The elementary functions, the arithmetic operators, `abs`, `arg`, `proj` and `polar` now follow C11/C23 Annex G. The special values are mapped to quaternions by axis reduction (see the README section "Infinities, NaNs and signed zeros").

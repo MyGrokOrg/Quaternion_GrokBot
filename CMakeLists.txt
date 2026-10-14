@@ -16,6 +16,7 @@ target_include_directories(quaternion INTERFACE
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 option(QUATERNION_BUILD_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
+option(QUATERNION_BUILD_BENCHMARKS "Build the benchmark suite (bench/)" OFF)
 include(CTest)
 
 if(BUILD_TESTING AND PROJECT_IS_TOP_LEVEL)
@@ -37,6 +38,11 @@ if(QUATERNION_BUILD_EXAMPLES)
     if(BUILD_TESTING AND PROJECT_IS_TOP_LEVEL)
         add_test(NAME example_basic COMMAND example_basic)
     endif()
+endif()
+
+if(QUATERNION_BUILD_BENCHMARKS)
+    add_executable(quaternion_bench bench/bench.cpp)
+    target_link_libraries(quaternion_bench PRIVATE quaternion)
 endif()
 
 install(TARGETS quaternion EXPORT QuaternionTargets)

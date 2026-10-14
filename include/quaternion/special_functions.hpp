@@ -29,6 +29,7 @@
 #include <cmath>
 #include <complex>
 #include <concepts>
+#include <cstdint>
 #include <limits>
 #include <type_traits>
 #include <vector>
@@ -569,30 +570,66 @@ template <class T>
 
 // Euler-Maclaurin summation for zeta(s), used for large |Im s| (no cap on |Im s|):
 //   zeta(s) = sum_{k<N} k^{-s} + N^{1-s}/(s-1) + N^{-s}/2
-//             + sum_j B_2j/(2j)! s(s+1)...(s+2j-2) N^{-s-2j+1}.
-// With N >= 0.6 |s| + 20 the tail terms shrink by (|s|/(2 pi N))^2 < 0.07 each, so the
-// 20 available Bernoulli numbers suffice.  Each k^{-s} uses log k in double-T (the phase
-// Im(s) log k is large) and the sum is accumulated in double-T.
+//             + sum_j c_j s(s+1)...(s+2j-2) N^{-s-2j+1},   c_j = B_2j/(2j)!.
+// For j > 20, c_j = 2 (-1)^{j+1} zeta(2j) / (2 pi)^{2j} is formed directly, so up to 80 tail terms
+// are available; with N = 0.3 |s| + 30 they shrink by about (|s|/(2 pi N))^2 < 0.29 each.
+// Each k^{-s} = exp(-s log k) uses log k in double-T (the phase Im(s) log k is large); the
+// logarithms come from a smallest-prime-factor sieve, log k = log p + log(k/p) (exact in
+// double-T), so only primes need a log evaluation.  The sum is accumulated in double-T.
 template <class T>
 [[nodiscard]] inline cplx<T> zeta_em(const cplx<T>& s) noexcept {
-    const long N = static_cast<long>(std::ceil(T(0.6) * std::abs(s))) + 20;
-    auto kpow = [&](long k) {
-        const dd<T> lk = log_dd(dd<T>{T(k), T()});
-        return exp_split(cdd<T>{-(lk * s.real()), -(lk * s.imag())});
+    const long N = static_cast<long>(std::ceil(T(0.3) * std::abs(s))) + 30;
+    const long cap = std::min<long>(N, 1L << 20);  // sieve/table size (memory bound)
+    std::vector<std::int32_t> spf(static_cast<std::size_t>(cap) + 1, 0);
+    std::vector<dd<T>> lg(static_cast<std::size_t>(cap) + 1);
+    for (long i = 2; i <= cap; ++i) {
+        if (spf[static_cast<std::size_t>(i)] == 0) {
+            for (long j = i; j <= cap; j += i)
+                if (spf[static_cast<std::size_t>(j)] == 0) spf[static_cast<std::size_t>(j)] = static_cast<std::int32_t>(i);
+        }
+    }
+    auto logk = [&](long k) -> dd<T> {
+        if (k > cap) return log_dd(dd<T>{T(k), T()});
+        return lg[static_cast<std::size_t>(k)];
     };
-    cdd<T> sum{};
-    for (long k = 1; k < N; ++k) sum = sum + to_cdd(kpow(k));
-    const cplx<T> nps = kpow(N);  // N^{-s}
+    auto kpow = [&](const dd<T>& lk) { return exp_split(cdd<T>{-(lk * s.real()), -(lk * s.imag())}); };
+    cdd<T> sum{{T(1), T()}, {T(), T()}};
+    for (long k = 2; k <= N; ++k) {
+        if (k <= cap) {
+            const long p = spf[static_cast<std::size_t>(k)];
+            lg[static_cast<std::size_t>(k)] =
+                p == k ? log_dd(dd<T>{T(k), T()}) : lg[static_cast<std::size_t>(p)] + lg[static_cast<std::size_t>(k / p)];
+        }
+        if (k < N) sum = sum + to_cdd(kpow(logk(k)));
+    }
+    const cplx<T> nps = kpow(logk(N));  // N^{-s}
     cplx<T> tail = cdiv(T(N) * nps, s - T(1)) + nps / T(2);
-    cplx<T> poch = s, pw = nps / T(N);  // s, N^{-s-1}
-    T fact = T(2);                     // (2j)!
-    for (int j = 1; j <= 20; ++j) {
-        const cplx<T> term = bernoulli_2k<T>(j) / fact * poch * pw;
+    cplx<T> pp = s * (nps / T(N));  // s(s+1)...(s+2j-2) N^{-s-2j+1}, kept as one product
+    const T twopi2 = T(4) * pi<T> * pi<T>;
+    T pj = T(1);                        // (2 pi)^{-2j}
+    T fact = T(1);                      // (2j)!
+    T prev = std::numeric_limits<T>::infinity();
+    for (int j = 1; j <= 80; ++j) {
+        pj /= twopi2;
+        fact *= T(2 * j - 1) * T(2 * j);
+        T cj;
+        if (j <= 20) {
+            cj = bernoulli_2k<T>(j) / fact;
+        } else {
+            T z2j = T(1);  // zeta(2j), 2j > 40: a few terms suffice
+            for (int m = 2; m < 16; ++m) {
+                const T t = std::pow(T(m), T(-2 * j));
+                z2j += t;
+                if (t < eps<T>() * eps<T>()) break;
+            }
+            cj = (j % 2 ? T(2) : T(-2)) * z2j * pj;
+        }
+        const cplx<T> term = cj * pp;
+        const T at = std::abs(term);
         tail += term;
-        if (std::abs(term) <= eps<T>() * eps<T>() * std::abs(tail)) break;
-        poch *= (s + T(2 * j - 1)) * (s + T(2 * j));
-        pw /= T(N) * T(N);
-        fact *= T(2 * j + 1) * T(2 * j + 2);
+        if (at <= eps<T>() * eps<T>() * std::abs(tail) || at > prev) break;
+        prev = at;
+        pp *= ((s + T(2 * j - 1)) / T(N)) * ((s + T(2 * j)) / T(N));
     }
     return to_cplx(sum + to_cdd(tail));
 }
@@ -666,6 +703,10 @@ template <class T>
     return cdiv(eta, denom);
 }
 
+template <class T>
+struct bessel_all;
+template <class T>
+[[nodiscard]] inline bessel_all<T> bessel_jyh(T nu, const cplx<T>& z);
 // ---- Bessel J_n, integer order ----------------------------------------------------
 template <class T>
 [[nodiscard]] inline cplx<T> cyl_bessel_j(int n, const cplx<T>& z) noexcept {
@@ -689,6 +730,7 @@ template <class T>
         }
         return lead * sum;
     }
+    if (az >= T(16) && T(n) * T(n) < az) return bessel_jyh(T(n), z).j;  // Hankel asymptotics
     // Miller's backward recurrence f_{k-1} = (2k/z) f_k - f_{k+1}, normalised by
     // either 1 = J0 + 2 sum J_{2k} or cos z = J0 + 2 sum (-1)^k J_{2k}, whichever
     // suffers less cancellation.
@@ -939,6 +981,60 @@ template <class T>
     return std::sqrt(cdiv(pi<T>, T(2) * w)) * std::exp(-w) * I;
 }
 
+// Hankel's asymptotic expansion (DLMF 10.40.2)
+//   K_mu(w) ~ sqrt(pi/(2w)) e^{-w} sum_k a_k(mu) / w^k,  a_k = prod_{j<=k} (4mu^2 - (2j-1)^2) / (8j),
+// valid for |ph w| < 3pi/2 (the sign of a zero imaginary part of w selects ph w = +-pi).
+// The error is below the first omitted term.  Returns false unless the terms decrease
+// monotonically to below eps/4 of the sum (so it is used only where it is accurate);
+// for half-integer mu the series terminates and is exact.
+template <class T>
+[[nodiscard]] inline bool bessel_k_asym(T mu, const cplx<T>& w, cplx<T>& k) {
+    const T m4 = T(4) * mu * mu;
+    const cplx<T> inv = cdiv(T(1), T(8) * w);
+    cplx<T> term(T(1)), sum(T(1));
+    T prev = T(1);
+    for (int j = 1; j < 400; ++j) {
+        const T odd = T(2 * j - 1);
+        term *= ((m4 - odd * odd) / T(j)) * inv;
+        const T at = std::abs(term);
+        sum += term;
+        if (at <= eps<T>() / T(4) * std::abs(sum)) {
+            k = std::sqrt(cdiv(pi<T>, T(2) * w)) * std::exp(-w) * sum;
+            return true;
+        }
+        if (!(at < prev)) return false;
+        prev = at;
+    }
+    return false;
+}
+// K_mu(w) for Re w >= 0: the asymptotic expansion for large |w|, otherwise the
+// double-exponential Laplace integral.
+template <class T>
+[[nodiscard]] inline cplx<T> bessel_k_one(T mu, const cplx<T>& w) {
+    cplx<T> k;
+    if (std::abs(w) >= T(8) && bessel_k_asym(mu, w, k)) return k;
+    return bessel_k_laplace(mu, w);
+}
+// K_mu and K_{mu+1}, Re w >= 0.  For mu >= 2, K is computed at the orders mu0 and mu0+1
+// (mu0 = frac(mu)) and recurred upward, K_{n+1} = K_{n-1} + (2n/w) K_n; K is the dominant
+// solution for increasing order on Re w >= 0, so the recurrence is stable (Temme).
+template <class T>
+struct kpair { cplx<T> k0, k1; };
+template <class T>
+[[nodiscard]] inline kpair<T> bessel_k_pair(T mu, const cplx<T>& w) {
+    if (mu < T(2)) return {bessel_k_one(mu, w), bessel_k_one(mu + T(1), w)};
+    const T fl = std::floor(mu), m0 = mu - fl;
+    const long n = static_cast<long>(fl);
+    cplx<T> a = bessel_k_one(m0, w), b = bessel_k_one(m0 + T(1), w);
+    const cplx<T> two_over_w = cdiv(T(2), w);
+    for (long j = 1; j <= n; ++j) {
+        const cplx<T> c = a + (m0 + T(j)) * two_over_w * b;
+        a = b;
+        b = c;
+    }
+    return {a, b};
+}
+
 // Ratio Z_{mu+1}/Z_mu of the minimal solution by the continued fraction
 //   1/(b1 + s/(b2 + s/(b3 + ...))), b_k = 2(mu+k)/z,
 // with s = -1 for J and s = +1 for I (modified Lentz).
@@ -974,8 +1070,16 @@ template <class T>
 [[nodiscard]] inline bessel_jh<T> bessel_core_q1(T mu, const cplx<T>& z) {
     const cplx<T> w = mul_mi(z);
     const cplx<T> c(T(), -T(2) / pi<T>);
-    const cplx<T> h0 = c * expi_pi(-mu / T(2)) * bessel_k_laplace(mu, w);
-    const cplx<T> h1 = c * expi_pi(-(mu + T(1)) / T(2)) * bessel_k_laplace(mu + T(1), w);
+    const kpair<T> kp = bessel_k_pair(mu, w);
+    const cplx<T> h0 = c * expi_pi(-mu / T(2)) * kp.k0;
+    const cplx<T> h1 = c * expi_pi(-(mu + T(1)) / T(2)) * kp.k1;
+    // Large |z|: J = (H1 + H2)/2 with H2_mu(z) = (2i/pi) e^{i mu pi/2} K_mu(iz) from the
+    // asymptotic expansion (ph(iz) in [pi/2, pi]); this avoids the O(|z|) continued fraction.
+    cplx<T> k2;
+    if (std::abs(z) >= T(16) && bessel_k_asym(mu, mul_i(z), k2)) {
+        const cplx<T> h2 = cplx<T>(T(), T(2) / pi<T>) * expi_pi(mu / T(2)) * k2;
+        return {(h0 + h2) / T(2), h0};
+    }
     const cplx<T> rho = bessel_ratio(mu, z, T(-1));
     const cplx<T> j = cdiv(cplx<T>(T(), T(2) / pi<T>), z * (rho * h0 - h1));
     return {j, h0};
@@ -1048,7 +1152,7 @@ template <class T>
     if (!is_finite(w)) return {nan<T>(), nan<T>()};
     if (w == cplx<T>()) return {std::numeric_limits<T>::infinity(), T()};
     if (on_lower_side(w)) return std::conj(bessel_k_nu(mu, std::conj(w)));
-    if (w.real() >= T()) return bessel_k_laplace(mu, w);
+    if (w.real() >= T()) return bessel_k_pair(mu, w).k0;
     // K_mu(w) = -(pi i/2) e^{-i mu pi/2} H2_mu(-iw), -pi/2 < ph w <= pi   (DLMF 10.27.8)
     return cplx<T>(T(), -pi<T> / T(2)) * expi_pi(-mu / T(2)) * bessel_jyh(mu, mul_mi(w)).h2;
 }
@@ -1056,9 +1160,22 @@ template <class T>
 // I_mu(w), mu >= 0, Re w >= 0, w != 0, from the Wronskian I_mu K_{mu+1} + I_{mu+1} K_mu = 1/w.
 template <class T>
 [[nodiscard]] inline cplx<T> bessel_i_right(T mu, const cplx<T>& w) {
+    // Large |w|: I = (K_mu(w e^{-i pi}) - e^{i mu pi} K_mu(w)) / (pi i)  (DLMF 10.34.2), both
+    // K from the asymptotic expansion; Im w < 0 by conjugation.
+    if (std::abs(w) >= T(16)) {
+        const bool low = on_lower_side(w);
+        const cplx<T> ww = low ? std::conj(w) : w;
+        // -ww with ph in [-pi, -pi/2]: a zero imaginary part becomes -0
+        const cplx<T> wm(-ww.real(), -ww.imag());
+        cplx<T> ka, kb;
+        if (bessel_k_asym(mu, wm, ka) && bessel_k_asym(mu, ww, kb)) {
+            const cplx<T> r = mul_mi(ka - expi_pi(mu) * kb) / pi<T>;
+            return low ? std::conj(r) : r;
+        }
+    }
     const cplx<T> r = bessel_ratio(mu, w, T(1));
-    const cplx<T> k0 = bessel_k_laplace(mu, w), k1 = bessel_k_laplace(mu + T(1), w);
-    return cdiv(T(1), w * (k1 + r * k0));
+    const kpair<T> kp = bessel_k_pair(mu, w);
+    return cdiv(T(1), w * (kp.k1 + r * kp.k0));
 }
 template <class T>
 [[nodiscard]] inline cplx<T> bessel_i_nu(T nu, const cplx<T>& w) {

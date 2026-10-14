@@ -41,3 +41,24 @@ jobs:
         run: cmake --build build -j
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  benchmarks:
+    # Informational only: never fails the workflow; results are uploaded as an artifact.
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure
+        run: cmake -B build -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_BUILD_TYPE=Release -DQUATERNION_BUILD_BENCHMARKS=ON -DBUILD_TESTING=OFF
+      - name: Build
+        run: cmake --build build -j --target quaternion_bench
+      - name: Run
+        run: ./build/quaternion_bench --min-time 0.1 --json bench.json | tee bench.txt
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            bench.json
+            bench.txt

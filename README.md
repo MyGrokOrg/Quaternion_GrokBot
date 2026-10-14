@@ -27,6 +27,14 @@ ctest --test-dir build --output-on-failure
 cmake --install build --prefix /your/prefix     # optional
 ```
 
+**Benchmarks.** `-DQUATERNION_BUILD_BENCHMARKS=ON` builds `quaternion_bench`, a self-contained suite with no dependencies. It covers core operations, elementary functions, and special functions, including Bessel and ζ at small and large arguments and orders. Each case is repeated until `--min-time` seconds (default 0.2) have passed, and the report gives the mean ns per call. `--filter SUBSTR` selects cases by `group/case/type`, and `--json FILE` writes the results. CI runs the suite in a non-gating job and uploads `bench.json`/`bench.txt` as the `benchmark-results` artifact. The timings come from shared runners, so treat them as indicative only.
+
+```bash
+cmake -B build-bench -DCMAKE_BUILD_TYPE=Release -DQUATERNION_BUILD_BENCHMARKS=ON
+cmake --build build-bench --target quaternion_bench
+./build-bench/quaternion_bench --filter bessel --json bessel.json
+```
+
 Consume it with CMake:
 
 ```cmake
@@ -144,7 +152,7 @@ So `f(q)` lies in the same complex plane as `q` and commutes with it. On the `i`
 | `digamma(q)` | ψ = Γ′/Γ. Uses the asymptotic series after recurrence, and reflection for `Re < ½`. |
 | `beta(q, b)`, `beta(b, q)` | B(q, b) = Γ(q)Γ(b)/Γ(q+b) for real `b`. Two quaternions on different axes have no well-defined beta. |
 | `erf(q)`, `erfc(q)` | Maclaurin series for `|Re| < ½`, summed in double-length arithmetic. `exp(−z²)` is formed with `z²` split exactly by FMA. Otherwise the Laplace continued fraction for `erfc` (modified Lentz), with `erfc(−z) = 2 − erfc(z)`. |
-| `riemann_zeta(q)` | ζ. On `Re ≥ ½`, uses Borwein's η algorithm for `|Im s| ≤ 1` and Euler–Maclaurin summation otherwise. The Euler–Maclaurin sum takes N ≈ 0.6·|s| + 20 terms plus up to 20 Bernoulli corrections, so there is no cap on `|Im s|`; the cost is O(|s|). On `Re < ½` it uses the functional equation. The phases `Im(s)·log k`, the partial sum and the functional-equation exponent are carried in double-length arithmetic. ζ(1) = ∞, ζ(0) = −½, and the trivial zeros are exact. |
+| `riemann_zeta(q)` | ζ. On `Re ≥ ½`, uses Borwein's η algorithm for `|Im s| ≤ 1` and Euler–Maclaurin summation otherwise. The Euler–Maclaurin sum takes N ≈ 0.3·|s| + 30 terms plus up to 80 Bernoulli corrections (B₂ⱼ/(2j)! = 2(−1)^{j+1}ζ(2j)/(2π)^{2j} for j > 20), so there is no cap on `|Im s|`. The log k come from a smallest-prime-factor sieve: log k = log p + log(k/p) in double-length arithmetic, so only primes need a logarithm. The cost is O(|s|), about 0.1 µs per unit of |Im s| in double (8 ms at |Im s| = 10⁵). On `Re < ½` it uses the functional equation. The phases `Im(s)·log k`, the partial sum and the functional-equation exponent are carried in double-length arithmetic. ζ(1) = ∞, ζ(0) = −½, and the trivial zeros are exact. |
 | `cyl_bessel_j(n, q)` | J_n for integer `n` (an entire function). Uses the power series for `|z| ≤ 1`. Otherwise it uses Miller's backward recurrence, normalized by `1 = J₀ + 2ΣJ₂ₖ` or `cos z = J₀ + 2Σ(−1)ᵏJ₂ₖ`, whichever cancels less. |
 
 **Branch cuts.** For a nonzero vector part, the complex kernel is only evaluated on the closed upper half-plane, since `|v| ≥ 0`. On a branch cut along the real axis, the result is the limit from above (imaginary part +0), which is what `std::complex` gives for `(x, +0)`. For `asin acos atan asinh acosh atanh`, a real argument with a −0 `i` component gives the lower side, as `std::complex` does for `(x, −0)`; the other special functions always use the upper side. For example, `asin(2) = π/2 + 1.3169…i`, `lgamma(−2.5) = −0.0562… − 3πi`, and `log1p(−3) = log 2 + πi`. Any imaginary part of a real argument goes on the `i` axis, as with `sqrt` and `log`.
@@ -208,9 +216,15 @@ These also use axis reduction. Real parameters such as orders, degrees, moduli a
 
 **Methods.**
 
-* **K_ν** comes from its Laplace-type integral (DLMF 10.32.8), rotated so the integrand does not oscillate. The integral is evaluated by double-exponential quadrature.
+* **K_ν, |w| ≥ 8.** Hankel's asymptotic expansion (DLMF 10.40.2) is used whenever its terms decrease monotonically to below ε/4. For half-integer ν it terminates and is exact.
+* **K_ν, otherwise.** K_ν comes from its Laplace-type integral (DLMF 10.32.8), rotated so the integrand does not oscillate. The integral is evaluated by double-exponential quadrature.
+* **Large order, ν ≥ 2.** K is computed at the orders frac(ν) and frac(ν)+1, then recurred upward with K_{n+1} = K_{n−1} + (2n/w)K_n (Temme's approach). This is stable because K is the dominant solution.
 * **H⁽¹⁾_ν** is K_ν(−iz) up to a factor.
-* **J_ν** comes from the Wronskian together with the continued fraction for J_{ν+1}/J_ν. I_ν is computed the same way with I_{ν+1}/I_ν.
+* **J_ν, |z| ≥ 16, where the expansion converges.** J = (H⁽¹⁾ + H⁽²⁾)/2, with H⁽²⁾_ν(z) = (2i/π)e^{iνπ/2}K_ν(iz) from the same expansion.
+* **J_ν, otherwise.** J_ν comes from the Wronskian together with the continued fraction for J_{ν+1}/J_ν. The continued fraction needs O(|z|) terms.
+* **I_ν, |w| ≥ 16.** I = (K_ν(w e^{−iπ}) − e^{iνπ}K_ν(w))/(πi) (DLMF 10.34.2), with both K from the expansion.
+* **I_ν, otherwise.** I_ν is computed the same way as J_ν, with I_{ν+1}/I_ν.
+* **Integer-order J_n** uses Miller's algorithm, except for |z| ≥ 16 with n² < |z|, where it uses the expansion above.
 * **Other quadrants and negative orders** use the analytic-continuation formulas.
 * **Airy functions** are computed from K_{1/3}/I_{1/3}, or from J_{1/3}/Y_{1/3} when |ph z| > 2π/3.
 * **Elliptic integrals** use Carlson's R_F, R_D and R_J with complex arguments.
@@ -251,7 +265,7 @@ Accuracy degrades in these cases:
 
 * **Hurwitz ζ conditioning.** The condition number of ζ(s, a) with respect to s grows like |s|·log, so rounding s alone limits the relative accuracy to about |s|·ε. The library stays within a small multiple of that, up to |Im s| = 400 (the largest tested). Near a zero of ζ(s, ·), the condition number with respect to `a` is |a·s·ζ(s+1, a)/ζ(s, a)|, which can reach 10³–10⁴. That is why the error there can reach about 2e-13; these cases are input conditioning, not algorithm error.
 * **Complex `a` (internal).** Li_s calls ζ(1−s, a) with complex `a`, which is accurate there because Im s = 0. With complex `a`, Re s < −6 and |Im s| > 8, Hermite's integral cancels by up to about 10³·|s|·ε. With complex `a`, Re s > 3 and small |Im s|, neither method is reliable. No public function reaches either case.
-* **Bessel functions.** The quadrature behind K_ν is adaptive, and the J/I continued fractions need O(|z|) terms, so large |z| or |ν| is slow but still accurate.
+* **Bessel functions.** Small |z| (below about 8–16) still goes through the adaptive quadrature, at about 25 µs (double) or 140 µs (long double) per call. Large |z| takes about 0.4 µs. Large order costs O(ν) recurrence steps, and its accuracy degrades slowly with ν: random tests show a median of about 40 ulp and a worst case of about 650 ulp for 20 ≤ ν ≤ 250 (before this change, the worst case was up to 10¹⁵ ulp). The uniform (Debye/Olver) expansions are not implemented. Near zeros of J_ν on the real axis with |z| ≥ 16, J = (H⁽¹⁾ + H⁽²⁾)/2 is accurate to ε·|H| absolutely, not relatively. This is as in other libraries; Y_ν already behaved this way.
 * **Lambert W at −1/e.** W is computed to a few ulp of the exact value for the given floating-point input. Because W ≈ −1 + √(2e(z + 1/e)), an input rounding error δ moves the true W by about √(2e)·δ/(2√|z + 1/e|). That error comes from the input, not from this library. Also, a quaternion argument q = a + |v|u can only reach one side of the cut along (−∞, −1/e], namely the |v| ≥ 0 side. So branches k and −k are related by conjugation when the axis is reversed.
 * **Γ(a, z).** The Legendre continued fraction is evaluated backwards, from a term count that the modified Lentz algorithm finds first. The forward Lentz product accumulated tens of ulp. The factor z^a e^{−z} is formed with a double-length exponent. The fraction is used unless z is within about 3° of the negative real axis (1 + cos arg z ≤ 0.004), or |z| ≤ 2 (|z| ≤ 0.8 for arg z ≤ 0.6π). Elsewhere a power series is used:
   * For a ≤ ½, the series is taken around the nearest pole a = −n + δ. The pole of Γ(a) and the k = n term are combined analytically as `(−1)ⁿ/n!·[expm1(log Γ(1+δ) − Σ log1p(−δ/m)) − expm1(δ log z)]/δ`, so nothing cancels at or near the non-positive integers.
