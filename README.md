@@ -142,6 +142,79 @@ Typical errors are a few ulp. Accuracy degrades in these cases:
 * lgamma for `Re z < −4000`: it falls back to reflection, so the imaginary part may be off by a multiple of 2π.
 * J_n for `|z|` beyond about 10⁵: the cost grows like `O(|z|)`.
 
+#### More special functions
+
+These also use axis reduction. Real parameters such as orders, degrees, moduli and `a`, `b` stay real; the argument shown as `q` is the quaternion. Integer orders and degrees are `unsigned`. Floating orders accept any floating type.
+
+| Function | Quaternion argument | Notes |
+|---|---|---|
+| `cyl_bessel_j(ν, q)`, `cyl_neumann(ν, q)` | `q` | J_ν, Y_ν for real ν (negative allowed), principal branches with the cut on (−∞, 0]. `cyl_bessel_j(int n, q)` still uses the integer-order kernel. |
+| `cyl_bessel_i(ν, q)`, `cyl_bessel_k(ν, q)` | `q` | I_ν, K_ν. |
+| `cyl_hankel_1(ν, q)`, `cyl_hankel_2(ν, q)` | `q` | H⁽¹⁾ = J + iY and H⁽²⁾ = J − iY, where *i* is the axis of `q`; they are never real. |
+| `sph_bessel(n, q)`, `sph_neumann(n, q)`, `sph_hankel_1/2(n, q)` | `q` | j_n, y_n, h_n = √(π/2q) × the order n+½ function. |
+| `airy_ai(q)`, `airy_bi(q)` | `q` | Entire. |
+| `legendre(l, q)`, `assoc_legendre(l, m, q)` | `q` | P_l and P_l^m = (1−q²)^{m/2} d^m P_l/dq^m with no Condon–Shortley phase, which is the `std::assoc_legendre` convention. Odd m uses the principal square root. |
+| `sph_legendre(l, m, θ)` | `θ` | Y_l^m(θ, 0) including the (−1)^m phase, as `std::sph_legendre`. |
+| `hermite(n, q)`, `laguerre(n, q)`, `assoc_laguerre(n, m, q)` | `q` | Physicists' H_n and generalized L_n^m. |
+| `chebyshev_t(n, q)`, `chebyshev_u(n, q)` | `q` | T_n, U_n. |
+| `comp_ellint_1(k)`, `comp_ellint_2(k)` | modulus `k` | K(k), E(k), with the modulus convention of `<cmath>` (m = k²). |
+| `comp_ellint_3(k, ν)` | characteristic `ν` | Π(ν, k) = ∫₀^{π/2} dθ / ((1 − ν sin²θ)√(1 − k² sin²θ)), the `<cmath>` convention. Real `k`. |
+| `ellint_1(k, φ)`, `ellint_2(k, φ)` | amplitude `φ` | F(φ, k), E(φ, k). Real `k`. The amplitude is reduced modulo π. |
+| `ellint_3(k, ν, φ)` | characteristic `ν` | Π(ν, φ, k). Real `k` and `φ`. |
+| `expint(q)` | `q` | Ei. On the real axis it is the real principal value, as `std::expint`; elsewhere Ei(z) = −E₁(−z) ± iπ. |
+| `expint(n, q)` | `q` | E_n (E₁ is the exponential integral E1). |
+| `sinint(q)`, `cosint(q)` | `q` | Si (entire), Ci (cut on (−∞, 0]). |
+| `fresnel_s(q)`, `fresnel_c(q)` | `q` | S, C with the kernel sin(πt²/2), cos(πt²/2). |
+| `polygamma(m, q)`, `trigamma(q)` | `q` | ψ^(m). |
+| `hurwitz_zeta(s, a)` | `s` | ζ(s, a) for real `a`. |
+| `polylog(s, q)` | `q` | Li_s for real `s` (integer or not), with the cut on [1, ∞). |
+| `lambert_w(q)`, `lambert_w(k, q)` | `q` | W_k for any integer branch k, using the branch conventions of mpmath and Corless et al. W₀ is real on [−1/e, ∞) and W₋₁ is real on [−1/e, 0). |
+| `tgamma_upper(a, q)`, `tgamma_lower(a, q)` | `q` | Γ(a, q) for any real a (including a ≤ 0), and γ(a, q) for a not a non-positive integer. |
+| `gamma_p(a, q)`, `gamma_q(a, q)` | `q` | Regularized P and Q for a > 0. |
+| `ibeta(a, b, q)`, `ibetac(a, b, q)` | `q` | Regularized I_q(a, b) and 1 − I_q(a, b) for a, b > 0. |
+
+**Methods.**
+
+* **K_ν** comes from its Laplace-type integral (DLMF 10.32.8), rotated so the integrand does not oscillate. The integral is evaluated by double-exponential quadrature.
+* **H⁽¹⁾_ν** is K_ν(−iz) up to a factor.
+* **J_ν** comes from the Wronskian together with the continued fraction for J_{ν+1}/J_ν. I_ν is computed the same way with I_{ν+1}/I_ν.
+* **Other quadrants and negative orders** use the analytic-continuation formulas.
+* **Airy functions** are computed from K_{1/3}/I_{1/3}, or from J_{1/3}/Y_{1/3} when |ph z| > 2π/3.
+* **Elliptic integrals** use Carlson's R_F, R_D and R_J with complex arguments.
+* **E₁** uses the power series or the continued fraction. Si, Ci and Fresnel use the power series for small |z|, and otherwise E₁ or erf.
+* **ψ^(m)** uses recurrence and then the asymptotic series.
+* **Hurwitz ζ** uses Euler–Maclaurin.
+* **Li_s** uses the power series, or the expansion in log z, or inversion. The inversion uses Bernoulli polynomials for integer s and Jonquière's formula otherwise.
+* **Lambert W** uses Halley iteration. The start is the branch-point series or the asymptotic expansion.
+* **Incomplete gamma** uses the series or the Legendre continued fraction, and recurrence for a ≤ 0. Incomplete beta uses its continued fraction.
+* **Polynomials** are evaluated by their three-term recurrences in quaternion arithmetic, so they are exact polynomials in `q`.
+
+**Accuracy** was measured against mpmath at about 300 random points per function. The table gives the worst relative error.
+
+| | double | long double (x87) | sampled region |
+|---|---|---|---|
+| J, Y, I, K, H⁽¹⁾, H⁽²⁾ (−12 ≤ ν ≤ 12) | 9e-14 (J near a real zero), otherwise ≤ 2e-14 | 1.2e-17 | \|Re z\|, Im z ≤ 30 |
+| Ai | 3e-14 | 3e-17 | ≤ 15 |
+| Bi | 5e-12 (near zeros on the negative axis) | 7e-17 | ≤ 15 |
+| K, E, F, E(φ), Π | 3e-15 | 1e-18 | ≤ 3 to 6 |
+| E₁, Ei, Si, Ci | 6e-15 | 5e-18 | ≤ 30 to 40 |
+| Fresnel S, C | 3e-14 | 1e-17 | ≤ 5 |
+| ψ^(m), m ≤ 6 | 1.4e-12 (next to poles) | 8e-18 | ≤ 20 |
+| Hurwitz ζ, Re s ≥ 0 | 1e-13 | 3e-16 | \|s\| ≤ 20, 0.1 ≤ a ≤ 5 |
+| Li_s, −3 ≤ s ≤ 6 | 1e-12 | 2e-16 | \|z\| ≤ 6 |
+| Lambert W, branches −3 … 2 | 2e-16 | 1e-19 | \|z\| ≤ 50 |
+| Γ(a, z), γ(a, z), −4 ≤ a ≤ 8 | 8e-13 | 7e-17 | ≤ 20 |
+| I_x(a, b), 0.2 ≤ a, b ≤ 6 | 6e-15 | 2e-18 | \|x\| ≤ 1.5 |
+
+Accuracy degrades in these cases:
+
+* **Hurwitz ζ for Re s < 0.** Euler–Maclaurin cancels: about 1e-13 at Re s = −2, 1e-10 at −4, and 1e-6 at −8. Li_s for non-integer s > 3 and |z| > e^5.5 inherits this, because it uses ζ(1−s, a).
+* **Bessel functions.** The quadrature behind K_ν is adaptive, and the J/I continued fractions need O(|z|) terms, so large |z| or |ν| is slow but still accurate.
+* **The branch point of Lambert W at −1/e.** The result is limited by the conditioning (√ of the distance) and by how well −1/e can be represented.
+* **Γ(a, z) for a within 1e-3 of a negative integer** near the negative real axis. It uses the recurrence, with some cancellation.
+
+**Not provided.** Elliptic integrals with two quaternion parameters and Hurwitz ζ with a quaternion `a` are not provided, since axis reduction needs a single quaternion argument.
+
 ### Tuple protocol, formatting and literals
 
 * `std::tuple_size<quaternion<T>>` is 4, and `std::tuple_element<I, quaternion<T>>` is `T`. `quat::get<I>(q)` is found by ADL, so structured bindings work, and so does `using std::get; get<0>(q);`.
@@ -167,7 +240,7 @@ Q v = r * 1.0_i * conj(r);                              // ≈ (0,0,1,0)
 
 * Mixed-precision binary operators such as `quaternion<float> * quaternion<double>` are not provided, which matches `std::complex`. Convert one operand explicitly. The compound assignments do accept other precisions.
 * The standard forbids adding overloads to namespace `std`, so `std::get<I>(q)` written fully qualified does not compile. Use `quat::get`, ADL, or structured bindings.
-* The special functions use a single complex kernel per function. The `std::` special functions that need non-integer orders or several arguments (for example `cyl_bessel_j(ν, x)` with real ν, Legendre polynomials, or elliptic integrals) are not provided.
+* The special functions lift a complex kernel in one argument. Every other parameter (an order, a degree, the modulus `k`, the Hurwitz `a`, the incomplete gamma/beta `a` and `b`) must be real.
 * **libc++ and `long double`.** libc++ 18/19 gives only double-precision `std::numbers` constants for `long double`, and it divides `complex<long double>` values in double precision. This library therefore carries its own constants and uses its own complex division (Smith's algorithm) in every kernel. One effect remains: on libc++, `long double` `asin`, `acos`, `asinh` and `acosh` are only as accurate as libc++'s own versions, about 1e-16. They are correct to a few ulp with libstdc++.
 * The transcendental functions are not `constexpr`, because `<cmath>` is not `constexpr` until C++26. All arithmetic, `norm`, `conj`, `inverse`, `dot`, `cross` and integer `pow` are `constexpr`.
 * No special IEEE handling of infinities and NaNs (C99 Annex G style) is done beyond `proj` and `abs`.

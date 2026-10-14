@@ -19,7 +19,7 @@ option(QUATERNION_BUILD_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
 include(CTest)
 
 if(BUILD_TESTING AND PROJECT_IS_TOP_LEVEL)
-    foreach(t core math io special)
+    foreach(t core math io special special2)
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE quaternion)
         if(MSVC)

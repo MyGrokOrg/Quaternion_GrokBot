@@ -28,6 +28,7 @@
 #include <climits>
 #include <cmath>
 #include <complex>
+#include <concepts>
 #include <limits>
 #include <type_traits>
 #include <vector>
@@ -405,6 +406,950 @@ template <class T>
     return {w.imag(), -w.real()};
 }
 
+// =====================================================================================
+// Extended special functions: complex kernels
+// =====================================================================================
+
+template <class T>
+[[nodiscard]] inline cplx<T> mul_i(const cplx<T>& z) noexcept { return {-z.imag(), z.real()}; }
+template <class T>
+[[nodiscard]] inline cplx<T> mul_mi(const cplx<T>& z) noexcept { return {z.imag(), -z.real()}; }
+// exp(i pi x) for real x, exact at integers and half-integers.
+template <class T>
+[[nodiscard]] inline cplx<T> expi_pi(T x) noexcept { return {cospi(x), sinpi(x)}; }
+template <class T>
+[[nodiscard]] inline bool on_lower_side(const cplx<T>& z) noexcept {
+    return z.imag() < T() || (z.imag() == T() && std::signbit(z.imag()));
+}
+template <class T>
+[[nodiscard]] inline cplx<T> ipow(cplx<T> z, unsigned n) noexcept {
+    cplx<T> r(T(1));
+    for (; n; n >>= 1) {
+        if (n & 1u) r *= z;
+        z *= z;
+    }
+    return r;
+}
+template <class T>
+[[nodiscard]] inline bool is_finite(const cplx<T>& z) noexcept {
+    return std::isfinite(z.real()) && std::isfinite(z.imag());
+}
+
+// ---- double-exponential quadrature on (0, inf) ---------------------------------------
+// Ooura-Mori transformation u = exp(t - exp(-t)) for integrands that decay
+// exponentially and may have an integrable algebraic singularity at 0.  The step is
+// halved until two levels agree to 32 eps relative to the sum of |terms|.
+template <class T, class F>
+[[nodiscard]] inline cplx<T> de_half_infinite(F&& f) {
+    const T e = eps<T>();
+    auto term = [&](T t) -> cplx<T> {
+        const T et = std::exp(-t);
+        const T u = std::exp(t - et);
+        if (!(u > T()) || !std::isfinite(u)) return {};
+        const cplx<T> v = f(u);
+        return v * ((T(1) + et) * u);
+    };
+    T h = T(0.25);
+    const T lo0 = T(-7), hi0 = T(12);
+    const int n0 = static_cast<int>((hi0 - lo0) / h);
+    std::vector<cplx<T>> first(static_cast<std::size_t>(n0) + 1);
+    T maxmag{};
+    for (int k = 0; k <= n0; ++k) {
+        first[static_cast<std::size_t>(k)] = term(lo0 + T(k) * h);
+        maxmag = std::max(maxmag, std::abs(first[static_cast<std::size_t>(k)]));
+    }
+    if (!std::isfinite(maxmag)) return {nan<T>(), nan<T>()};
+    if (maxmag == T()) return {};
+    int kl = 0, kh = n0;
+    const T cut = maxmag * e * T(1e-6);
+    while (kl < n0 && std::abs(first[static_cast<std::size_t>(kl)]) < cut) ++kl;
+    while (kh > 0 && std::abs(first[static_cast<std::size_t>(kh)]) < cut) --kh;
+    kl = std::max(0, kl - 1);
+    kh = std::min(n0, kh + 1);
+    const T lo = lo0 + T(kl) * h, hi = lo0 + T(kh) * h;
+    cplx<T> sum{};
+    T abssum{};
+    for (int k = kl; k <= kh; ++k) {
+        sum += first[static_cast<std::size_t>(k)];
+        abssum += std::abs(first[static_cast<std::size_t>(k)]);
+    }
+    cplx<T> S = sum * h;
+    for (int level = 1; level <= 11; ++level) {
+        h /= T(2);
+        cplx<T> add{};
+        for (T t = lo + h; t < hi; t += T(2) * h) {
+            const cplx<T> v = term(t);
+            add += v;
+            abssum += std::abs(v);
+        }
+        sum += add;
+        const cplx<T> Snew = sum * h;
+        const T scale = abssum * h;
+        const bool done = std::abs(Snew - S) <= T(32) * e * scale;
+        S = Snew;
+        if (done && level >= 2) break;
+    }
+    return S;
+}
+
+// ---- Bessel functions of real order -------------------------------------------------
+// K_mu(w), mu >= 0, |ph w| <= pi/2, w != 0:
+//   K_mu(w) = sqrt(pi/(2w)) e^{-w} / Gamma(mu+1/2) * int_0^inf e^{-u} u^{mu-1/2} (1 + u/(2w))^{mu-1/2} du
+// (DLMF 10.32.8 with the contour rotated so that the exponential is real).  The integrand
+// does not oscillate, so the double-exponential rule converges for every |w|.
+template <class T>
+[[nodiscard]] inline cplx<T> bessel_k_laplace(T mu, const cplx<T>& w) {
+    const T a = mu - T(0.5);
+    const T lg = std::lgamma(mu + T(0.5));
+    const cplx<T> inv2w = cdiv(T(0.5), w);
+    const cplx<T> I = de_half_infinite<T>([&](T u) -> cplx<T> {
+        const cplx<T> ex = cplx<T>(-u - lg) + a * (cplx<T>(std::log(u)) + log1p(u * inv2w));
+        return std::exp(ex);
+    });
+    return std::sqrt(cdiv(pi<T>, T(2) * w)) * std::exp(-w) * I;
+}
+
+// Ratio Z_{mu+1}/Z_mu of the minimal solution by the continued fraction
+//   1/(b1 + s/(b2 + s/(b3 + ...))), b_k = 2(mu+k)/z,
+// with s = -1 for J and s = +1 for I (modified Lentz).
+template <class T>
+[[nodiscard]] inline cplx<T> bessel_ratio(T mu, const cplx<T>& z, T s) {
+    const T tiny = std::numeric_limits<T>::min() * T(1e10);
+    const cplx<T> two_over_z = cdiv(T(2), z);
+    cplx<T> f = (mu + T(1)) * two_over_z;
+    if (std::abs(f) < tiny) f = tiny;
+    cplx<T> C = f, D{};
+    const long kmax = 1000000 + static_cast<long>(4 * std::abs(z));
+    for (long k = 2; k < kmax; ++k) {
+        const cplx<T> b = (mu + T(k)) * two_over_z;
+        D = b + s * D;
+        if (std::abs(D) < tiny) D = tiny;
+        D = cdiv(T(1), D);
+        C = b + cdiv(s, C);
+        if (std::abs(C) < tiny) C = tiny;
+        const cplx<T> delta = C * D;
+        f *= delta;
+        if (std::abs(delta - T(1)) <= eps<T>()) break;
+    }
+    return cdiv(T(1), f);
+}
+
+template <class T>
+struct bessel_jh { cplx<T> j, h1; };
+
+// J_mu(z) and H1_mu(z) for z in the closed first quadrant, z != 0, mu >= 0:
+//   H1_mu(z) = (2/(pi i)) e^{-i mu pi/2} K_mu(-iz)                 (DLMF 10.27.8)
+//   J_mu(z)  = 2i / (pi z (rho H1_mu - H1_{mu+1})),  rho = J_{mu+1}/J_mu   (Wronskian)
+template <class T>
+[[nodiscard]] inline bessel_jh<T> bessel_core_q1(T mu, const cplx<T>& z) {
+    const cplx<T> w = mul_mi(z);
+    const cplx<T> c(T(), -T(2) / pi<T>);
+    const cplx<T> h0 = c * expi_pi(-mu / T(2)) * bessel_k_laplace(mu, w);
+    const cplx<T> h1 = c * expi_pi(-(mu + T(1)) / T(2)) * bessel_k_laplace(mu + T(1), w);
+    const cplx<T> rho = bessel_ratio(mu, z, T(-1));
+    const cplx<T> j = cdiv(cplx<T>(T(), T(2) / pi<T>), z * (rho * h0 - h1));
+    return {j, h0};
+}
+
+template <class T>
+struct bessel_all { cplx<T> j, y, h1, h2; };
+
+// J, Y, H1, H2 of real order nu at any z != 0 (principal branches, cut along the
+// negative real axis; the side is taken from the sign of Im z, including signed zero).
+template <class T>
+[[nodiscard]] inline bessel_all<T> bessel_jyh(T nu, const cplx<T>& z) {
+    const T mu = std::abs(nu);
+    const bool lower = on_lower_side(z);
+    const cplx<T> zz = lower ? std::conj(z) : z;
+    cplx<T> j, h1;
+    if (zz.real() >= T()) {
+        const auto c = bessel_core_q1(mu, zz);
+        j = c.j;
+        h1 = c.h1;
+    } else {
+        // z = conj(w) e^{i pi}: J(z) = e^{i mu pi} conj J(w), H1(z) = -e^{-i mu pi} conj H1(w).
+        const auto c = bessel_core_q1(mu, cplx<T>(-zz.real(), zz.imag()));
+        j = expi_pi(mu) * std::conj(c.j);
+        h1 = -expi_pi(-mu) * std::conj(c.h1);
+    }
+    bessel_all<T> r{j, mul_i(j - h1), h1, T(2) * j - h1};
+    if (lower) r = {std::conj(r.j), std::conj(r.y), std::conj(r.h2), std::conj(r.h1)};
+    if (nu < T()) {
+        const T s = sinpi(mu), c = cospi(mu);
+        r = {c * r.j - s * r.y, s * r.j + c * r.y, expi_pi(mu) * r.h1, expi_pi(-mu) * r.h2};
+    }
+    return r;
+}
+
+template <class T>
+[[nodiscard]] inline bool is_integer(T x) noexcept { return std::isfinite(x) && x == std::floor(x); }
+
+template <class T>
+[[nodiscard]] inline cplx<T> bessel_j_nu(T nu, const cplx<T>& z) {
+    if (!is_finite(z)) return {nan<T>(), nan<T>()};
+    if (z == cplx<T>()) {
+        if (nu == T()) return {T(1), T()};
+        if (nu > T() || is_integer(nu)) return {};
+        return {std::numeric_limits<T>::infinity(), T()};
+    }
+    return bessel_jyh(nu, z).j;
+}
+template <class T>
+[[nodiscard]] inline cplx<T> bessel_y_nu(T nu, const cplx<T>& z) {
+    if (!is_finite(z)) return {nan<T>(), nan<T>()};
+    if (z == cplx<T>()) return {-std::numeric_limits<T>::infinity(), T()};
+    return bessel_jyh(nu, z).y;
+}
+template <class T>
+[[nodiscard]] inline cplx<T> hankel_1(T nu, const cplx<T>& z) {
+    if (z == cplx<T>()) return {nan<T>(), -std::numeric_limits<T>::infinity()};
+    return bessel_jyh(nu, z).h1;
+}
+template <class T>
+[[nodiscard]] inline cplx<T> hankel_2(T nu, const cplx<T>& z) {
+    if (z == cplx<T>()) return {nan<T>(), std::numeric_limits<T>::infinity()};
+    return bessel_jyh(nu, z).h2;
+}
+
+// K_nu(w) for any w != 0 (cut along the negative real axis).
+template <class T>
+[[nodiscard]] inline cplx<T> bessel_k_nu(T nu, const cplx<T>& w) {
+    const T mu = std::abs(nu);
+    if (!is_finite(w)) return {nan<T>(), nan<T>()};
+    if (w == cplx<T>()) return {std::numeric_limits<T>::infinity(), T()};
+    if (on_lower_side(w)) return std::conj(bessel_k_nu(mu, std::conj(w)));
+    if (w.real() >= T()) return bessel_k_laplace(mu, w);
+    // K_mu(w) = -(pi i/2) e^{-i mu pi/2} H2_mu(-iw), -pi/2 < ph w <= pi   (DLMF 10.27.8)
+    return cplx<T>(T(), -pi<T> / T(2)) * expi_pi(-mu / T(2)) * bessel_jyh(mu, mul_mi(w)).h2;
+}
+
+// I_mu(w), mu >= 0, Re w >= 0, w != 0, from the Wronskian I_mu K_{mu+1} + I_{mu+1} K_mu = 1/w.
+template <class T>
+[[nodiscard]] inline cplx<T> bessel_i_right(T mu, const cplx<T>& w) {
+    const cplx<T> r = bessel_ratio(mu, w, T(1));
+    const cplx<T> k0 = bessel_k_laplace(mu, w), k1 = bessel_k_laplace(mu + T(1), w);
+    return cdiv(T(1), w * (k1 + r * k0));
+}
+template <class T>
+[[nodiscard]] inline cplx<T> bessel_i_nu(T nu, const cplx<T>& w) {
+    const T mu = std::abs(nu);
+    if (!is_finite(w)) return {nan<T>(), nan<T>()};
+    if (w == cplx<T>()) {
+        if (nu == T()) return {T(1), T()};
+        if (nu > T() || is_integer(nu)) return {};
+        return {std::numeric_limits<T>::infinity(), T()};
+    }
+    cplx<T> i;
+    if (w.real() >= T()) i = bessel_i_right(mu, w);
+    else i = expi_pi(on_lower_side(w) ? -mu : mu) * bessel_i_right(mu, -w);  // I(w e^{+-i pi}) = e^{+-i mu pi} I(w)
+    if (nu < T() && !is_integer(mu)) i += (T(2) / pi<T>) * sinpi(mu) * bessel_k_nu(mu, w);
+    return i;
+}
+
+// Spherical Bessel functions: f_n(z) = sqrt(pi/(2z)) F_{n+1/2}(z).
+template <class T>
+[[nodiscard]] inline cplx<T> sph_factor(const cplx<T>& z) { return std::sqrt(cdiv(pi<T>, T(2) * z)); }
+template <class T>
+[[nodiscard]] inline cplx<T> sph_bessel_j(unsigned n, const cplx<T>& z) {
+    if (z == cplx<T>()) return {n == 0 ? T(1) : T(), T()};
+    return sph_factor(z) * bessel_jyh(T(n) + T(0.5), z).j;
+}
+template <class T>
+[[nodiscard]] inline cplx<T> sph_bessel_y(unsigned n, const cplx<T>& z) {
+    if (z == cplx<T>()) return {-std::numeric_limits<T>::infinity(), T()};
+    return sph_factor(z) * bessel_jyh(T(n) + T(0.5), z).y;
+}
+template <class T>
+[[nodiscard]] inline cplx<T> sph_hankel(unsigned n, const cplx<T>& z, int kind) {
+    if (z == cplx<T>()) return {nan<T>(), nan<T>()};
+    const auto b = bessel_jyh(T(n) + T(0.5), z);
+    return sph_factor(z) * (kind == 1 ? b.h1 : b.h2);
+}
+
+// ---- Airy functions ---------------------------------------------------------------------
+// |ph z| <= 2pi/3: Ai = sqrt(z/3) K_{1/3}(zeta)/pi, Bi = sqrt(z/3) (2 I_{1/3}(zeta) + sqrt3/pi K_{1/3}(zeta)),
+// otherwise with t = -z: Ai = sqrt(t)/2 (J_{1/3} - Y_{1/3}/sqrt3), Bi = -sqrt(t)/2 (J_{1/3}/sqrt3 + Y_{1/3}),
+// zeta = (2/3) z^{3/2} (DLMF 9.6).
+template <class T>
+[[nodiscard]] inline cplx<T> airy(const cplx<T>& z, bool bi) {
+    if (!is_finite(z)) return {nan<T>(), nan<T>()};
+    if (z == cplx<T>()) {
+        const T ai0 = static_cast<T>(0.355028053887817239260063186004183176L);
+        const T bi0 = static_cast<T>(0.614926627446000735150922369093613554L);
+        return {bi ? bi0 : ai0, T()};
+    }
+    if (on_lower_side(z) && z.imag() != T()) return std::conj(airy(std::conj(z), bi));
+    const T third = T(1) / T(3), sqrt3 = std::sqrt(T(3));
+    const T ph = std::arg(z);
+    if (std::abs(ph) <= T(2) * pi<T> / T(3)) {
+        const cplx<T> zeta = (T(2) / T(3)) * z * std::sqrt(z);
+        const cplx<T> pre = std::sqrt(z / T(3));
+        const cplx<T> k = bessel_k_nu(third, zeta);
+        if (!bi) return pre * k / pi<T>;
+        return pre * (T(2) * bessel_i_nu(third, zeta) + (sqrt3 / pi<T>) * k);
+    }
+    const cplx<T> t = -z;
+    const cplx<T> zeta = (T(2) / T(3)) * t * std::sqrt(t);
+    const auto b = bessel_jyh(third, zeta);
+    const cplx<T> st = std::sqrt(t) / T(2);
+    if (!bi) return st * (b.j - b.y / sqrt3);
+    return -st * (b.j / sqrt3 + b.y);
+}
+
+// ---- Carlson symmetric elliptic integrals (complex arguments) ---------------------------
+template <class T>
+[[nodiscard]] inline cplx<T> carlson_rf(cplx<T> x, cplx<T> y, cplx<T> z) {
+    const cplx<T> A0 = (x + y + z) / T(3);
+    T Q = std::pow(T(3) * eps<T>(), T(-1) / T(6)) *
+          std::max({std::abs(A0 - x), std::abs(A0 - y), std::abs(A0 - z)});
+    cplx<T> A = A0;
+    const cplx<T> x0 = x, y0 = y;
+    T f = T(1);  // 4^{-m}
+    for (int m = 0; m < 100 && !(f * Q < std::abs(A)); ++m) {
+        const cplx<T> sx = std::sqrt(x), sy = std::sqrt(y), sz = std::sqrt(z);
+        const cplx<T> lam = sx * sy + sx * sz + sy * sz;
+        A = (A + lam) / T(4);
+        x = (x + lam) / T(4);
+        y = (y + lam) / T(4);
+        z = (z + lam) / T(4);
+        f /= T(4);
+    }
+    const cplx<T> X = cdiv((A0 - x0) * f, A), Y = cdiv((A0 - y0) * f, A), Z = -(X + Y);
+    const cplx<T> E2 = X * Y - Z * Z, E3 = X * Y * Z;
+    const cplx<T> s = T(1) - E2 / T(10) + E3 / T(14) + E2 * E2 / T(24) - T(3) * E2 * E3 / T(44);
+    return cdiv(s, std::sqrt(A));
+}
+template <class T>
+[[nodiscard]] inline cplx<T> carlson_rd(cplx<T> x, cplx<T> y, cplx<T> z) {
+    const cplx<T> A0 = (x + y + T(3) * z) / T(5);
+    T Q = std::pow(eps<T>() / T(4), T(-1) / T(6)) *
+          std::max({std::abs(A0 - x), std::abs(A0 - y), std::abs(A0 - z)});
+    cplx<T> A = A0, sum{};
+    const cplx<T> x0 = x, y0 = y;
+    T f = T(1);
+    for (int m = 0; m < 100 && !(f * Q < std::abs(A)); ++m) {
+        const cplx<T> sx = std::sqrt(x), sy = std::sqrt(y), sz = std::sqrt(z);
+        const cplx<T> lam = sx * sy + sx * sz + sy * sz;
+        sum += cdiv(cplx<T>(f), sz * (z + lam));
+        A = (A + lam) / T(4);
+        x = (x + lam) / T(4);
+        y = (y + lam) / T(4);
+        z = (z + lam) / T(4);
+        f /= T(4);
+    }
+    const cplx<T> X = cdiv((A0 - x0) * f, A), Y = cdiv((A0 - y0) * f, A), Z = -(X + Y) / T(3);
+    const cplx<T> E2 = X * Y - T(6) * Z * Z, E3 = (T(3) * X * Y - T(8) * Z * Z) * Z;
+    const cplx<T> E4 = T(3) * (X * Y - Z * Z) * Z * Z, E5 = X * Y * Z * Z * Z;
+    const cplx<T> s = T(1) - T(3) * E2 / T(14) + E3 / T(6) + T(9) * E2 * E2 / T(88) - T(3) * E4 / T(22) -
+                      T(9) * E2 * E3 / T(52) + T(3) * E5 / T(26);
+    return f * cdiv(s, A * std::sqrt(A)) + T(3) * sum;
+}
+// R_C(1, 1 + e)
+template <class T>
+[[nodiscard]] inline cplx<T> carlson_rc1(const cplx<T>& e) {
+    return carlson_rf(cplx<T>(T(1)), T(1) + e, T(1) + e);
+}
+// R_J(x, y, z, p): x, y, z real non-negative (at most one zero), p complex in the cut plane
+// (Carlson 1995, with the R_C(1, 1+e) form of the sum).
+template <class T>
+[[nodiscard]] inline cplx<T> carlson_rj(cplx<T> x, cplx<T> y, cplx<T> z, cplx<T> p) {
+    const cplx<T> A0 = (x + y + z + T(2) * p) / T(5);
+    const cplx<T> delta = (p - x) * (p - y) * (p - z);
+    T Q = std::pow(eps<T>() / T(4), T(-1) / T(6)) *
+          std::max({std::abs(A0 - x), std::abs(A0 - y), std::abs(A0 - z), std::abs(A0 - p)});
+    cplx<T> A = A0, sum{};
+    const cplx<T> x0 = x, y0 = y, z0 = z;
+    T f = T(1);
+    for (int m = 0; m < 100 && !(f * Q < std::abs(A)); ++m) {
+        const cplx<T> sx = std::sqrt(x), sy = std::sqrt(y), sz = std::sqrt(z), sp = std::sqrt(p);
+        const cplx<T> lam = sx * sy + sx * sz + sy * sz;
+        const cplx<T> d = (sp + sx) * (sp + sy) * (sp + sz);
+        const cplx<T> e = cdiv(delta * (f * f * f), d * d);
+        sum += f * cdiv(carlson_rc1(e), d);
+        A = (A + lam) / T(4);
+        x = (x + lam) / T(4);
+        y = (y + lam) / T(4);
+        z = (z + lam) / T(4);
+        p = (p + lam) / T(4);
+        f /= T(4);
+    }
+    const cplx<T> X = cdiv((A0 - x0) * f, A), Y = cdiv((A0 - y0) * f, A), Z = cdiv((A0 - z0) * f, A);
+    const cplx<T> P = -(X + Y + Z) / T(2);
+    const cplx<T> E2 = X * Y + X * Z + Y * Z - T(3) * P * P;
+    const cplx<T> E3 = X * Y * Z + T(2) * E2 * P + T(4) * P * P * P;
+    const cplx<T> E4 = (T(2) * X * Y * Z + E2 * P + T(3) * P * P * P) * P;
+    const cplx<T> E5 = X * Y * Z * P * P;
+    const cplx<T> s = T(1) - T(3) * E2 / T(14) + E3 / T(6) + T(9) * E2 * E2 / T(88) - T(3) * E4 / T(22) -
+                      T(9) * E2 * E3 / T(52) + T(3) * E5 / T(26);
+    return f * cdiv(s, A * std::sqrt(A)) + T(6) * sum;
+}
+
+// p = 1 - nu c for real c > 0, keeping the side of the cut: a real nu > 1/c lies on the cut
+// of R_J, and the upper side of nu maps to the lower side of p.
+template <class T>
+[[nodiscard]] inline cplx<T> rj_param(const cplx<T>& nu, T c) {
+    cplx<T> p(T(1) - nu.real() * c, -nu.imag() * c);
+    if (p.imag() == T() && p.real() < T()) p.imag(-std::numeric_limits<T>::min() * T(1e100));
+    return p;
+}
+template <class T>
+[[nodiscard]] inline cplx<T> comp_ellint_1k(const cplx<T>& k) {
+    if (k * k == cplx<T>(T(1))) return {std::numeric_limits<T>::infinity(), T()};
+    return carlson_rf(cplx<T>(), T(1) - k * k, cplx<T>(T(1)));
+}
+template <class T>
+[[nodiscard]] inline cplx<T> comp_ellint_2k(const cplx<T>& k) {
+    const cplx<T> k2 = k * k;
+    if (k2 == cplx<T>(T(1))) return {T(1), T()};
+    const cplx<T> y = T(1) - k2;
+    return carlson_rf(cplx<T>(), y, cplx<T>(T(1))) - k2 / T(3) * carlson_rd(cplx<T>(), y, cplx<T>(T(1)));
+}
+// Pi(nu, k) with std's convention int_0^{pi/2} dt / ((1 - nu sin^2 t) sqrt(1 - k^2 sin^2 t)).
+template <class T>
+[[nodiscard]] inline cplx<T> comp_ellint_3n(T k, const cplx<T>& nu) {
+    const cplx<T> y(T(1) - k * k);
+    if (nu == cplx<T>(T(1))) return {std::numeric_limits<T>::infinity(), T()};
+    return carlson_rf(cplx<T>(), y, cplx<T>(T(1))) +
+           nu / T(3) * carlson_rj(cplx<T>(), y, cplx<T>(T(1)), rj_param(nu, T(1)));
+}
+// Reduce the amplitude: phi = phi0 + m pi with |Re phi0| <= pi/2.
+template <class T>
+[[nodiscard]] inline T amplitude_periods(const cplx<T>& phi) noexcept {
+    return std::round(phi.real() / pi<T>);
+}
+template <class T>
+[[nodiscard]] inline cplx<T> ellint_1p(T k, const cplx<T>& phi) {
+    const T m = amplitude_periods(phi);
+    const cplx<T> p0 = phi - m * pi<T>;
+    const cplx<T> s = std::sin(p0), c = std::cos(p0);
+    cplx<T> r = s * carlson_rf(c * c, T(1) - k * k * s * s, cplx<T>(T(1)));
+    if (m != T()) r += T(2) * m * comp_ellint_1k(cplx<T>(k));
+    return r;
+}
+template <class T>
+[[nodiscard]] inline cplx<T> ellint_2p(T k, const cplx<T>& phi) {
+    const T m = amplitude_periods(phi);
+    const cplx<T> p0 = phi - m * pi<T>;
+    const cplx<T> s = std::sin(p0), c = std::cos(p0);
+    const cplx<T> x = c * c, y = T(1) - k * k * s * s;
+    cplx<T> r = s * carlson_rf(x, y, cplx<T>(T(1))) -
+                (k * k / T(3)) * s * s * s * carlson_rd(x, y, cplx<T>(T(1)));
+    if (m != T()) r += T(2) * m * comp_ellint_2k(cplx<T>(k));
+    return r;
+}
+template <class T>
+[[nodiscard]] inline cplx<T> ellint_3n(T k, const cplx<T>& nu, T phi) {
+    const T m = std::round(phi / pi<T>);
+    const T p0 = phi - m * pi<T>;
+    const T s = std::sin(p0), c = std::cos(p0);
+    const cplx<T> x(c * c), y(T(1) - k * k * s * s);
+    cplx<T> r = s * carlson_rf(x, y, cplx<T>(T(1))) +
+                (nu / T(3)) * (s * s * s) * carlson_rj(x, y, cplx<T>(T(1)), rj_param(nu, s * s));
+    if (m != T()) r += T(2) * m * comp_ellint_3n(k, nu);
+    return r;
+}
+
+// ---- exponential integrals ----------------------------------------------------------------
+// E1(z), principal branch (cut along the negative real axis).  Power series where the
+// cancellation exp(|z| + Re z) is small, otherwise the continued fraction
+//   E1(z) = e^{-z} / (z + 1 - 1/(z + 3 - 4/(z + 5 - ...)))   (valid |ph z| < pi).
+template <class T>
+[[nodiscard]] inline cplx<T> expint_e1(const cplx<T>& z) {
+    if (!is_finite(z)) {
+        if (z.imag() == T() && z.real() == std::numeric_limits<T>::infinity()) return {};
+        return {nan<T>(), nan<T>()};
+    }
+    if (z == cplx<T>()) return {std::numeric_limits<T>::infinity(), T()};
+    const T r = std::abs(z);
+    if (r <= T(2) || r + z.real() <= T(4)) {
+        cplx<T> term(T(1)), sum{};
+        for (int k = 1; k < 100000; ++k) {
+            term *= -z / T(k);
+            const cplx<T> t = term / T(k);
+            sum += t;
+            if (T(k) > r && std::abs(t) <= eps<T>() * std::abs(sum) / 4) break;
+        }
+        return -egamma_v<T> - std::log(z) - sum;
+    }
+    const T tiny = std::numeric_limits<T>::min() * T(1e10);
+    cplx<T> b = z + T(1), c = T(1) / tiny, d = cdiv(T(1), b), h = d;
+    for (int i = 1; i < 1000000; ++i) {
+        const T an = -T(i) * T(i);
+        b += T(2);
+        d = an * d + b;
+        if (std::abs(d) < tiny) d = tiny;
+        d = cdiv(T(1), d);
+        c = b + cdiv(cplx<T>(an), c);
+        if (std::abs(c) < tiny) c = tiny;
+        const cplx<T> del = c * d;
+        h *= del;
+        if (std::abs(del - T(1)) <= eps<T>()) break;
+    }
+    return h * std::exp(-z);
+}
+// Ei(z): on the real axis the real-valued (principal value) Ei of <cmath>; elsewhere
+// Ei(z) = -E1(-z) + i pi sgn(Im z), i.e. gamma + log z + sum z^k/(k k!).
+template <class T>
+[[nodiscard]] inline cplx<T> expint_ei(const cplx<T>& z) {
+    if (z.imag() == T()) {
+        const T x = z.real();
+        if (x == T()) return {-std::numeric_limits<T>::infinity(), T()};
+        if (x < T()) return {-expint_e1(cplx<T>(-x)).real(), T()};
+        return {-expint_e1(cplx<T>(-x, -T())).real(), T()};
+    }
+    const cplx<T> e = -expint_e1(-z);
+    return {e.real(), e.imag() + (z.imag() > T() ? pi<T> : -pi<T>)};
+}
+
+// Si and Ci (Ci has its cut along the negative real axis).
+template <class T>
+[[nodiscard]] inline cplx<T> sici(const cplx<T>& z, bool want_ci) {
+    if (!is_finite(z)) return {nan<T>(), nan<T>()};
+    if (z == cplx<T>()) return want_ci ? cplx<T>(-std::numeric_limits<T>::infinity(), T()) : cplx<T>();
+    const T r = std::abs(z);
+    if (r <= T(4)) {
+        const cplx<T> z2 = z * z;
+        if (!want_ci) {
+            cplx<T> term = z, sum = z;
+            for (int k = 1; k < 1000; ++k) {
+                term *= -z2 / (T(2 * k) * T(2 * k + 1));
+                const cplx<T> t = term / T(2 * k + 1);
+                sum += t;
+                if (std::abs(t) <= eps<T>() * std::abs(sum) / 4) break;
+            }
+            return sum;
+        }
+        cplx<T> term(T(1)), sum{};
+        for (int k = 1; k < 1000; ++k) {
+            term *= -z2 / (T(2 * k - 1) * T(2 * k));
+            const cplx<T> t = term / T(2 * k);
+            sum += t;
+            if (std::abs(t) <= eps<T>() * std::max(std::abs(sum), T(1)) / 4) break;
+        }
+        return egamma_v<T> + std::log(z) + sum;
+    }
+    if (z.real() < T()) {
+        // Si(-z) = -Si(z); Ci(z) = Ci(-z) +- i pi for z in the upper/lower half plane.
+        const cplx<T> v = sici(-z, want_ci);
+        if (!want_ci) return -v;
+        return {v.real(), v.imag() + (on_lower_side(z) ? -pi<T> : pi<T>)};
+    }
+    // |ph z| <= pi/2: DLMF 6.5.5-6.5.6 (signed zeros select the side at ph z = +-pi/2).
+    const cplx<T> ep = expint_e1(mul_i(z)), em = expint_e1(mul_mi(z));
+    if (want_ci) return -(ep + em) / T(2);
+    return pi<T> / T(2) + mul_mi(ep - em) / T(2);
+}
+
+// Fresnel integrals S(z) = int_0^z sin(pi t^2/2) dt, C(z) = int_0^z cos(pi t^2/2) dt.
+template <class T>
+[[nodiscard]] inline cplx<T> fresnel(const cplx<T>& z, bool want_s) {
+    if (!is_finite(z)) return {nan<T>(), nan<T>()};
+    if (std::abs(z) <= T(1.5)) {
+        const cplx<T> z4 = z * z * z * z;
+        const T c = pi<T> / T(2);
+        // S: sum (-1)^k c^{2k+1} z^{4k+3}/((2k+1)! (4k+3)); C: sum (-1)^k c^{2k} z^{4k+1}/((2k)! (4k+1))
+        cplx<T> p = want_s ? c * z * z * z : z, sum = want_s ? p / T(3) : p;
+        for (int k = 1; k < 500; ++k) {
+            const T a = want_s ? T(2 * k) * T(2 * k + 1) : T(2 * k - 1) * T(2 * k);
+            p *= -(c * c) * z4 / a;
+            const cplx<T> t = p / T(want_s ? 4 * k + 3 : 4 * k + 1);
+            sum += t;
+            if (std::abs(t) <= eps<T>() * std::abs(sum) / 4) break;
+        }
+        return sum;
+    }
+    // C + iS = (1+i)/2 erf((1-i) sqrt(pi) z/2)   (DLMF 7.5.?) written for C and S separately.
+    const T h = std::sqrt(pi<T>) / T(2);
+    const cplx<T> ea = erf(cplx<T>(h, h) * z), eb = erf(cplx<T>(h, -h) * z);
+    if (want_s) return cplx<T>(T(0.25), T(0.25)) * (ea - mul_i(eb));
+    return cplx<T>(T(0.25), -T(0.25)) * (ea + mul_i(eb));
+}
+
+// ---- polygamma ---------------------------------------------------------------------------
+template <class T>
+[[nodiscard]] inline cplx<T> polygamma_k(unsigned m, cplx<T> z) {
+    if (m == 0) return digamma(z);
+    if (!is_finite(z)) return {nan<T>(), nan<T>()};
+    if (is_nonpositive_integer(z)) return {nan<T>(), T()};
+    const T sign = (m % 2 == 1) ? T(1) : T(-1);  // (-1)^{m+1}
+    T mfact = T(1);
+    for (unsigned i = 2; i <= m; ++i) mfact *= T(i);
+    const T R = T(25) + T(m);
+    cplx<T> s{};
+    while (z.real() < R) {
+        s += cdiv(T(1), ipow(z, m + 1));
+        z += T(1);
+    }
+    // psi^(m)(w) ~ (-1)^{m+1} [ (m-1)!/w^m + m!/(2 w^{m+1}) + sum_k B_2k (2k+m-1)!/((2k)! w^{2k+m}) ]
+    const cplx<T> inv = cdiv(T(1), z), inv2 = inv * inv;
+    cplx<T> wm = ipow(inv, m);  // w^{-m}
+    cplx<T> asym = (mfact / T(m)) * wm + (mfact / T(2)) * wm * inv;
+    T coef = mfact / T(m);  // (2k+m-1)!/(2k)! for k = 0 is (m-1)!
+    cplx<T> p = wm;
+    for (int k = 1; k <= stirling_terms; ++k) {
+        const T kk = T(k), mm = T(m);
+        coef *= (T(2) * kk + mm - T(2)) * (T(2) * kk + mm - T(1)) / ((T(2) * kk - T(1)) * (T(2) * kk));
+        p *= inv2;
+        asym += bernoulli_2k<T>(k) * coef * p;
+    }
+    return sign * (asym + mfact * s);
+}
+
+// ---- Hurwitz zeta (complex s, complex a) by Euler-Maclaurin -------------------------------
+template <class T>
+[[nodiscard]] inline cplx<T> hurwitz_zeta_k(const cplx<T>& s, const cplx<T>& a) {
+    if (!is_finite(s) || !is_finite(a)) return {nan<T>(), nan<T>()};
+    if (s == cplx<T>(T(1))) return {std::numeric_limits<T>::infinity(), T()};
+    const int M = stirling_terms;
+    const T need = (std::abs(s) + T(2 * M)) / pi<T> + T(2);
+    long N = 0;
+    while (std::abs(a + T(N)) < need || (a.real() + T(N)) < T(1)) ++N;
+    cplx<T> sum{};
+    for (long k = 0; k < N; ++k) {
+        const cplx<T> ak = a + T(k);
+        if (ak == cplx<T>()) return {std::numeric_limits<T>::infinity(), T()};
+        sum += std::exp(-s * std::log(ak));
+    }
+    const cplx<T> w = a + T(N), lw = std::log(w);
+    const cplx<T> ws = std::exp(-s * lw);  // w^{-s}
+    cplx<T> tail = cdiv(w * ws, s - T(1)) + ws / T(2);
+    // sum_j B_2j/(2j)! (s)_{2j-1} w^{-s-2j+1}
+    const cplx<T> inv = cdiv(T(1), w), inv2 = inv * inv;
+    cplx<T> poch = s, p = ws * inv;  // (s)_1 w^{-s-1}
+    T fact = T(2);                    // (2j)!
+    for (int j = 1; j <= M; ++j) {
+        tail += bernoulli_2k<T>(j) / fact * poch * p;
+        poch *= (s + T(2 * j - 1)) * (s + T(2 * j));
+        p *= inv2;
+        fact *= T(2 * j + 1) * T(2 * j + 2);
+    }
+    return sum + tail;
+}
+
+// ---- polylogarithm Li_s(z), real s ----------------------------------------------------------
+// Bernoulli polynomial B_n(x), n <= 40.
+template <class T>
+[[nodiscard]] inline cplx<T> bernoulli_poly(unsigned n, const cplx<T>& x) {
+    // B_n(x) = sum_k C(n,k) B_k x^{n-k}, B_0 = 1, B_1 = -1/2, B_odd>1 = 0
+    cplx<T> sum{}, xp(T(1));  // xp = x^{n-k} built from k = n downwards
+    T binom = T(1);           // C(n, k) for k = n
+    for (unsigned k = n + 1; k-- > 0;) {
+        T bk = T();
+        if (k == 0) bk = T(1);
+        else if (k == 1) bk = T(-0.5);
+        else if (k % 2 == 0) bk = bernoulli_2k<T>(static_cast<int>(k / 2));
+        sum += bk * binom * xp;
+        xp *= x;
+        if (k > 0) binom = binom * T(k) / T(n - k + 1);  // C(n, k-1)
+    }
+    return sum;
+}
+template <class T>
+[[nodiscard]] inline cplx<T> polylog_k(T s, const cplx<T>& z);
+
+template <class T>
+[[nodiscard]] inline cplx<T> polylog_series(T s, const cplx<T>& z) {
+    cplx<T> p = z, sum{};
+    for (int k = 1; k < 100000; ++k) {
+        const cplx<T> t = p * std::pow(T(k), -s);
+        sum += t;
+        if (std::abs(t) <= eps<T>() * std::abs(sum) / 8) break;
+        p *= z;
+    }
+    return sum;
+}
+// Expansion in mu = log z (|mu| < 2 pi):
+//   non-integer s: Li_s = Gamma(1-s) (-mu)^{s-1} + sum_k zeta(s-k) mu^k/k!
+//   integer s = n >= 1: Li_n = mu^{n-1}/(n-1)! (H_{n-1} - log(-mu)) + sum_{k != n-1} zeta(n-k) mu^k/k!
+template <class T>
+[[nodiscard]] inline cplx<T> polylog_logseries(T s, const cplx<T>& z) {
+    const cplx<T> mu = std::log(z);
+    const bool pos_int = is_integer(s) && s >= T(1);
+    const long n = pos_int ? static_cast<long>(s) : 0;
+    cplx<T> sum{}, p(T(1));
+    T fact = T(1);
+    for (long k = 0; k < 2000; ++k) {
+        if (k > 0) {
+            p *= mu;
+            fact *= T(k);
+        }
+        if (pos_int && k == n - 1) continue;
+        const T sk = s - T(k);
+        if (sk < T() && is_integer(sk) && static_cast<long>(sk) % 2 == 0) continue;  // trivial zeros
+        const T zk = riemann_zeta(cplx<T>(sk)).real();
+        const cplx<T> t = zk * p / fact;
+        sum += t;
+        if (k > 4 && std::abs(t) <= eps<T>() * std::abs(sum) / 8) break;
+    }
+    if (pos_int) {
+        T H = T();
+        for (long i = 1; i < n; ++i) H += T(1) / T(i);
+        T f = T(1);
+        for (long i = 2; i < n; ++i) f *= T(i);
+        return sum + ipow(mu, static_cast<unsigned>(n - 1)) / f * (H - std::log(-mu));
+    }
+    return sum + std::exp(lgamma(cplx<T>(T(1) - s))) * std::exp((s - T(1)) * std::log(-mu));
+}
+template <class T>
+[[nodiscard]] inline cplx<T> polylog_k(T s, const cplx<T>& z) {
+    if (!is_finite(z) || !std::isfinite(s)) return {nan<T>(), nan<T>()};
+    if (z == cplx<T>()) return {};
+    if (z == cplx<T>(T(1))) {
+        if (s > T(1)) return riemann_zeta(cplx<T>(s));
+        return {std::numeric_limits<T>::infinity(), T()};
+    }
+    if (s == T()) return cdiv(z, T(1) - z);
+    const T r = std::abs(z);
+    if (r <= T(0.5)) return polylog_series(s, z);
+    if (r >= T(2)) {
+        const cplx<T> zi = cdiv(T(1), z);
+        if (is_integer(s) && s < T()) {  // Li_{-n}(z) = (-1)^{n+1} Li_{-n}(1/z)
+            const long nn = static_cast<long>(-s);
+            const cplx<T> v = polylog_series(s, zi);
+            return (nn % 2 == 0) ? -v : v;
+        }
+        // a = 1/2 + log(-z)/(2 pi i)
+        const cplx<T> a = T(0.5) + mul_mi(std::log(-z)) / (T(2) * pi<T>);
+        if (is_integer(s) && s <= T(40)) {
+            // Li_n(z) = -(-1)^n Li_n(1/z) - (2 pi i)^n/n! B_n(a)
+            const unsigned nn = static_cast<unsigned>(s);
+            T f = T(1);
+            for (unsigned i = 2; i <= nn; ++i) f *= T(i);
+            const cplx<T> c = ipow(cplx<T>(T(), T(2) * pi<T>), nn) / f;
+            const cplx<T> v = polylog_series(s, zi);
+            return ((nn % 2 == 0) ? -v : v) - c * bernoulli_poly(nn, a);
+        }
+        if (!is_integer(s) && (s <= T(1) || std::abs(std::log(z)) > T(5.5))) {
+            // Li_s(z) = -e^{i pi s} Li_s(1/z) + (2 pi)^s e^{i pi s/2}/Gamma(s) zeta(1-s, a)
+            const cplx<T> v = polylog_series(s, zi);
+            const cplx<T> g = std::exp(s * std::log(T(2) * pi<T>) - lgamma(cplx<T>(s))) * expi_pi(s / T(2));
+            return -expi_pi(s) * v + g * hurwitz_zeta_k(cplx<T>(T(1) - s), a);
+        }
+    }
+    return polylog_logseries(s, z);
+}
+
+// ---- Lambert W ------------------------------------------------------------------------------
+template <class T>
+[[nodiscard]] inline cplx<T> lambert_w_k(int k, const cplx<T>& z) {
+    if (!is_finite(z)) return {nan<T>(), nan<T>()};
+    if (z == cplx<T>()) {
+        if (k == 0) return {};
+        return {-std::numeric_limits<T>::infinity(), T()};
+    }
+    const T e1 = std::exp(T(-1));
+    const bool real_axis = z.imag() == T();
+    cplx<T> w;
+    // distance from the branch point -1/e, with -1/e in two pieces to avoid cancellation
+    constexpr long double e1l = 0.367879441171442321595523770161460867L;
+    const T e1_lo = static_cast<T>(e1l - static_cast<long double>(static_cast<T>(e1l)));
+    const cplx<T> zb = (z + static_cast<T>(e1l)) + e1_lo;
+    const bool near_bp = std::abs(zb) < T(0.25) || (real_axis && z.real() < -e1 && z.real() > T(-1));
+    // p = sqrt(2(e z + 1)); W = -1 + p - p^2/3 + 11 p^3/72 - ... on the branch selected by p's sign.
+    auto bp_series = [&](cplx<T> p) {
+        return T(-1) + p - p * p / T(3) + T(11) / T(72) * p * p * p - T(43) / T(540) * p * p * p * p;
+    };
+    const cplx<T> p = std::sqrt(T(2) * std::exp(T(1)) * zb);
+    if (std::abs(p) < T(2e-4) && (k == 0 || (k == -1 && !on_lower_side(z)) || (k == 1 && on_lower_side(z))))
+        return bp_series(k == 0 ? p : -p);  // series error O(p^5)
+    if (near_bp && k == 0) {
+        w = bp_series(p);
+    } else if (near_bp && k == -1 && !on_lower_side(z)) {
+        w = bp_series(-p);
+    } else if (near_bp && k == 1 && on_lower_side(z)) {
+        w = bp_series(-p);
+    } else if (k == 0 && std::abs(z) <= T(1)) {
+        w = z * (T(1) - z + T(1.5) * z * z);  // series start
+        if (std::abs(z) > T(0.3)) w = std::log(T(1) + z);
+    } else {
+        cplx<T> L1 = std::log(z);
+        L1 += cplx<T>(T(), T(2) * pi<T> * T(k));
+        if (real_axis && k == -1 && z.real() < T() && z.real() > -e1) L1 = std::log(-z) - std::log(-std::log(-z));
+        const cplx<T> L2 = std::log(L1);
+        w = (std::abs(L1) > T(0)) ? L1 - L2 + cdiv(L2, L1) : L1;
+        if (real_axis && k == -1 && z.real() < T() && z.real() > -e1) w = L1;  // real start
+    }
+    for (int it = 0; it < 200; ++it) {
+        cplx<T> dw;
+        if (std::abs(w) > T(30) && std::abs(z) > T(1e6)) {
+            // Newton on w + log w = log z + 2 pi i k (avoids overflow of w e^w).
+            const cplx<T> g = w + std::log(w) - std::log(z) - cplx<T>(T(), T(2) * pi<T> * T(k));
+            dw = cdiv(g, T(1) + cdiv(T(1), w));
+        } else {
+            const cplx<T> ew = std::exp(w), f = w * ew - z, w1 = w + T(1);
+            const cplx<T> den = ew * w1 - cdiv((w + T(2)) * f, T(2) * w1);
+            dw = cdiv(f, den);
+        }
+        if (!is_finite(dw)) break;  // at the branch point w = -1 exactly
+        w -= dw;
+        if (!(std::abs(dw) > T(4) * eps<T>() * std::abs(w))) break;
+    }
+    return w;
+}
+
+// ---- incomplete gamma (real a, complex z) ---------------------------------------------------
+// Returns {P, Q} regularized, for a > 0.
+template <class T>
+struct pq { cplx<T> p, q; };
+template <class T>
+[[nodiscard]] inline pq<T> gamma_pq(T a, const cplx<T>& z) {
+    if (z == cplx<T>()) return {cplx<T>(), cplx<T>(T(1))};
+    const T r = std::abs(z);
+    const cplx<T> lz = std::log(z);
+    const T lga = std::lgamma(a);
+    if (r < a + T(1)) {
+        // P = z^a e^{-z}/Gamma(a) sum z^k / (a (a+1) ... (a+k))
+        cplx<T> term(T(1) / a), sum = term;
+        for (int k = 1; k < 1000000; ++k) {
+            term *= z / (a + T(k));
+            sum += term;
+            if (std::abs(term) <= eps<T>() * std::abs(sum) / 4) break;
+        }
+        const cplx<T> P = std::exp(a * lz - z - lga) * sum;
+        return {P, T(1) - P};
+    }
+    if (std::abs(std::arg(z)) < T(0.9) * pi<T>) {
+        // Q by the Legendre continued fraction.
+        const T tiny = std::numeric_limits<T>::min() * T(1e10);
+        cplx<T> b = z + T(1) - a, c = T(1) / tiny, d = cdiv(T(1), b), h = d;
+        for (int i = 1; i < 1000000; ++i) {
+            const T an = -T(i) * (T(i) - a);
+            b += T(2);
+            d = an * d + b;
+            if (std::abs(d) < tiny) d = tiny;
+            d = cdiv(T(1), d);
+            c = b + cdiv(cplx<T>(an), c);
+            if (std::abs(c) < tiny) c = tiny;
+            const cplx<T> del = c * d;
+            h *= del;
+            if (std::abs(del - T(1)) <= eps<T>()) break;
+        }
+        const cplx<T> Q = std::exp(a * lz - z - lga) * h;
+        return {T(1) - Q, Q};
+    }
+    // Near the negative real axis: P = z^a/Gamma(a) sum (-z)^k / (k! (a+k)).
+    cplx<T> term(T(1)), sum(T(1) / a);
+    for (int k = 1; k < 1000000; ++k) {
+        term *= -z / T(k);
+        const cplx<T> t = term / (a + T(k));
+        sum += t;
+        if (T(k) > r && std::abs(t) <= eps<T>() * std::abs(sum) / 4) break;
+    }
+    const cplx<T> P = std::exp(a * lz - lga) * sum;
+    return {P, T(1) - P};
+}
+// Gamma(a, z) = z^a e^{-z} / (z + 1 - a - 1(1-a)/(z + 3 - a - ...)), |ph z| < pi, any real a.
+template <class T>
+[[nodiscard]] inline cplx<T> gamma_cf(T a, const cplx<T>& z) {
+    const T tiny = std::numeric_limits<T>::min() * T(1e10);
+    cplx<T> b = z + T(1) - a, c = T(1) / tiny, d = cdiv(T(1), b), h = d;
+    for (int i = 1; i < 1000000; ++i) {
+        const T an = -T(i) * (T(i) - a);
+        b += T(2);
+        d = an * d + b;
+        if (std::abs(d) < tiny) d = tiny;
+        d = cdiv(T(1), d);
+        c = b + cdiv(cplx<T>(an), c);
+        if (std::abs(c) < tiny) c = tiny;
+        const cplx<T> del = c * d;
+        h *= del;
+        if (std::abs(del - T(1)) <= eps<T>()) break;
+    }
+    return std::exp(a * std::log(z) - z) * h;
+}
+// Upper incomplete gamma Gamma(a, z) for any real a (z != 0).
+template <class T>
+[[nodiscard]] inline cplx<T> gamma_upper(T a, const cplx<T>& z) {
+    if (!is_finite(z)) return {nan<T>(), nan<T>()};
+    if (z == cplx<T>()) {
+        if (a > T()) return {std::tgamma(a), T()};
+        return {std::numeric_limits<T>::infinity(), T()};
+    }
+    if (a > T()) return gamma_pq(a, z).q * std::tgamma(a);
+    if (!is_integer(a)) {
+        if (std::abs(z) > T(2) && std::abs(std::arg(z)) < T(0.9) * pi<T>) return gamma_cf(a, z);
+        if (a - std::floor(a) > T(1e-3) && std::ceil(a) - a > T(1e-3)) {
+            // Gamma(a, z) = Gamma(a) - z^a sum (-z)^k / (k! (a+k))
+            cplx<T> term(T(1)), sum(T(1) / a);
+            const T r = std::abs(z);
+            for (int k = 1; k < 1000000; ++k) {
+                term *= -z / T(k);
+                const cplx<T> t = term / (a + T(k));
+                sum += t;
+                if (T(k) > r && std::abs(t) <= eps<T>() * std::abs(sum) / 4) break;
+            }
+            return std::tgamma(a) - std::exp(a * std::log(z)) * sum;
+        }
+        // a within 1e-3 of a negative integer: Gamma(a, z) = (Gamma(a+1, z) - z^a e^{-z}) / a
+        // applied downwards from a + n > 0.
+        const long n = static_cast<long>(std::ceil(-a));
+        T b = a + T(n);
+        cplx<T> g = (b > T()) ? gamma_pq(b, z).q * std::tgamma(b) : expint_e1(z);
+        for (long i = 0; i < n; ++i) {
+            b -= T(1);
+            g = (g - std::exp(b * std::log(z) - z)) / b;
+        }
+        return g;
+    }
+    // a = 0, -1, -2, ...: start from Gamma(0, z) = E1(z).
+    const long n = static_cast<long>(-a);
+    if (std::abs(z) > T(2) && std::abs(std::arg(z)) < T(0.9) * pi<T>) return gamma_cf(a, z);
+    cplx<T> g = expint_e1(z);
+    T b = T();
+    for (long i = 0; i < n; ++i) {
+        b -= T(1);
+        g = (g - std::exp(b * std::log(z) - z)) / b;
+    }
+    return g;
+}
+template <class T>
+[[nodiscard]] inline cplx<T> gamma_lower(T a, const cplx<T>& z) {
+    if (a <= T() && is_integer(a)) return {nan<T>(), T()};
+    if (a > T()) return gamma_pq(a, z).p * std::tgamma(a);
+    return std::tgamma(a) - gamma_upper(a, z);
+}
+
+// ---- regularized incomplete beta I_x(a, b), real a, b > 0, complex x -----------------------
+template <class T>
+[[nodiscard]] inline cplx<T> betacf(T a, T b, const cplx<T>& x) {
+    const T tiny = std::numeric_limits<T>::min() * T(1e10);
+    const T qab = a + b, qap = a + T(1), qam = a - T(1);
+    cplx<T> c(T(1)), d = T(1) - qab * x / qap;
+    if (std::abs(d) < tiny) d = tiny;
+    d = cdiv(T(1), d);
+    cplx<T> h = d;
+    for (int m = 1; m < 1000000; ++m) {
+        const T m2 = T(2 * m);
+        cplx<T> aa = T(m) * (b - T(m)) * x / ((qam + m2) * (a + m2));
+        d = T(1) + aa * d;
+        if (std::abs(d) < tiny) d = tiny;
+        c = T(1) + cdiv(aa, c);
+        if (std::abs(c) < tiny) c = tiny;
+        d = cdiv(T(1), d);
+        h *= d * c;
+        aa = -(a + T(m)) * (qab + T(m)) * x / ((a + m2) * (qap + m2));
+        d = T(1) + aa * d;
+        if (std::abs(d) < tiny) d = tiny;
+        c = T(1) + cdiv(aa, c);
+        if (std::abs(c) < tiny) c = tiny;
+        d = cdiv(T(1), d);
+        const cplx<T> del = d * c;
+        h *= del;
+        if (std::abs(del - T(1)) <= eps<T>()) break;
+    }
+    return h;
+}
+template <class T>
+[[nodiscard]] inline cplx<T> ibeta_k(T a, T b, const cplx<T>& x) {
+    if (!is_finite(x)) return {nan<T>(), nan<T>()};
+    if (x == cplx<T>()) return {};
+    if (x == cplx<T>(T(1))) return {T(1), T()};
+    const T lbeta = std::lgamma(a) + std::lgamma(b) - std::lgamma(a + b);
+    const cplx<T> front = std::exp(a * std::log(x) + b * log1p(-x) - lbeta);
+    if (x.real() < (a + T(1)) / (a + b + T(2))) return front * betacf(a, b, x) / a;
+    return T(1) - front * betacf(b, a, T(1) - x) / b;
+}
+
 // ---- the axis-reduction lift ----------------------------------------------------------
 // F maps std::complex<W> -> std::complex<W>.  If real_on_real is true, the function is
 // known to be real on the real axis, and a purely real argument yields a real result.
@@ -484,6 +1429,468 @@ template <class T>
 [[nodiscard]] inline quaternion<T> beta(const T& a, const quaternion<T>& q) noexcept {
     return beta(q, a);
 }
+
+
+// =====================================================================================
+// Extended special functions (public API)
+// =====================================================================================
+// Real parameters (orders, degrees, moduli) are taken as a separate floating type N or an
+// integer; the quaternion argument is lifted by axis reduction.  The `pred` passed to the
+// lift tells, for a purely real argument x, whether the function is real there.
+
+namespace detail::sf {
+template <class T, class F, class P>
+    requires std::is_invocable_r_v<bool, P&, work_t<T>>
+[[nodiscard]] inline quaternion<T> lift(const quaternion<T>& q, F&& f, P&& real_at) {
+    using W = work_t<T>;
+    if (q.x() == T() && q.y() == T() && q.z() == T()) return lift(q, f, static_cast<bool>(real_at(static_cast<W>(q.w()))));
+    return lift(q, f, false);
+}
+template <class N, class T>
+[[nodiscard]] inline work_t<T> par(N v) noexcept { return static_cast<work_t<T>>(v); }
+}  // namespace detail::sf
+
+#define QUAT_SF_W using W = detail::sf::work_t<T>
+#define QUAT_SF_C std::complex<W>
+
+// ---- Bessel functions of real order ------------------------------------------------------
+/// J_nu(q), real order nu; principal branch with the cut along the negative real axis.
+template <class T, std::floating_point N>
+[[nodiscard]] inline quaternion<T> cyl_bessel_j(N nu, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W m = static_cast<W>(nu);
+    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_j_nu(m, z); },
+                            [m](W x) { return x >= W() || detail::sf::is_integer(m); });
+}
+/// Y_nu(q) (Bessel function of the second kind / Neumann function).
+template <class T, std::floating_point N>
+[[nodiscard]] inline quaternion<T> cyl_neumann(N nu, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W m = static_cast<W>(nu);
+    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_y_nu(m, z); },
+                            [](W x) { return x > W(); });
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> cyl_neumann(int n, const quaternion<T>& q) {
+    return cyl_neumann(static_cast<double>(n), q);
+}
+/// I_nu(q) (modified Bessel function of the first kind).
+template <class T, std::floating_point N>
+[[nodiscard]] inline quaternion<T> cyl_bessel_i(N nu, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W m = static_cast<W>(nu);
+    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_i_nu(m, z); },
+                            [m](W x) { return x >= W() || detail::sf::is_integer(m); });
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> cyl_bessel_i(int n, const quaternion<T>& q) {
+    return cyl_bessel_i(static_cast<double>(n), q);
+}
+/// K_nu(q) (modified Bessel function of the second kind).
+template <class T, std::floating_point N>
+[[nodiscard]] inline quaternion<T> cyl_bessel_k(N nu, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W m = static_cast<W>(nu);
+    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_k_nu(m, z); },
+                            [](W x) { return x > W(); });
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> cyl_bessel_k(int n, const quaternion<T>& q) {
+    return cyl_bessel_k(static_cast<double>(n), q);
+}
+/// Hankel functions H1_nu(q) = J + iY and H2_nu(q) = J - iY ("i" is the axis of q).
+template <class T, std::floating_point N>
+[[nodiscard]] inline quaternion<T> cyl_hankel_1(N nu, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W m = static_cast<W>(nu);
+    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::hankel_1(m, z); }, false);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> cyl_hankel_1(int n, const quaternion<T>& q) {
+    return cyl_hankel_1(static_cast<double>(n), q);
+}
+template <class T, std::floating_point N>
+[[nodiscard]] inline quaternion<T> cyl_hankel_2(N nu, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W m = static_cast<W>(nu);
+    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::hankel_2(m, z); }, false);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> cyl_hankel_2(int n, const quaternion<T>& q) {
+    return cyl_hankel_2(static_cast<double>(n), q);
+}
+/// Spherical Bessel functions j_n, y_n and Hankel functions h1_n, h2_n.
+template <class T>
+[[nodiscard]] inline quaternion<T> sph_bessel(unsigned n, const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [n](const QUAT_SF_C& z) { return detail::sf::sph_bessel_j(n, z); }, true);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> sph_neumann(unsigned n, const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [n](const QUAT_SF_C& z) { return detail::sf::sph_bessel_y(n, z); }, true);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> sph_hankel_1(unsigned n, const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [n](const QUAT_SF_C& z) { return detail::sf::sph_hankel(n, z, 1); }, false);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> sph_hankel_2(unsigned n, const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [n](const QUAT_SF_C& z) { return detail::sf::sph_hankel(n, z, 2); }, false);
+}
+/// Airy functions Ai(q), Bi(q) (entire).
+template <class T>
+[[nodiscard]] inline quaternion<T> airy_ai(const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::airy(z, false); }, true);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> airy_bi(const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::airy(z, true); }, true);
+}
+
+// ---- orthogonal polynomials (evaluated directly in quaternion arithmetic) -----------------
+// All are polynomials in q with real coefficients, hence exact axis reductions.
+namespace detail::sf {
+template <class T>
+using qw = quaternion<work_t<T>>;
+template <class T>
+[[nodiscard]] inline qw<T> to_w(const quaternion<T>& q) {
+    using W = work_t<T>;
+    return {static_cast<W>(q.w()), static_cast<W>(q.x()), static_cast<W>(q.y()), static_cast<W>(q.z())};
+}
+template <class T, class W>
+[[nodiscard]] inline quaternion<T> from_w(const quaternion<W>& q) {
+    return {static_cast<T>(q.w()), static_cast<T>(q.x()), static_cast<T>(q.y()), static_cast<T>(q.z())};
+}
+}  // namespace detail::sf
+
+/// Legendre polynomial P_l(q).
+template <class T>
+[[nodiscard]] inline quaternion<T> legendre(unsigned l, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const auto x = detail::sf::to_w(q);
+    quaternion<W> p0(W(1)), p1 = x;
+    if (l == 0) return detail::sf::from_w<T>(p0);
+    for (unsigned k = 1; k < l; ++k) {
+        quaternion<W> p2 = (W(2 * k + 1) * x * p1 - W(k) * p0) / W(k + 1);
+        p0 = p1;
+        p1 = p2;
+    }
+    return detail::sf::from_w<T>(p1);
+}
+/// Associated Legendre function P_l^m(q) = (1 - q^2)^{m/2} d^m/dq^m P_l(q), *without* the
+/// Condon-Shortley phase (the <cmath> std::assoc_legendre convention).  For odd m the
+/// principal square root of 1 - q^2 is used.
+template <class T>
+[[nodiscard]] inline quaternion<T> assoc_legendre(unsigned l, unsigned m, const quaternion<T>& q) {
+    QUAT_SF_W;
+    if (m > l) return quaternion<T>();
+    const auto x = detail::sf::to_w(q);
+    const quaternion<W> s = sqrt(W(1) - x * x);
+    // P_m^m = (2m-1)!! s^m
+    quaternion<W> pmm(W(1));
+    for (unsigned i = 1; i <= m; ++i) pmm = pmm * s * W(2 * i - 1);
+    if (l == m) return detail::sf::from_w<T>(pmm);
+    quaternion<W> pm1 = W(2 * m + 1) * x * pmm;
+    for (unsigned k = m + 2; k <= l; ++k) {
+        quaternion<W> p2 = (W(2 * k - 1) * x * pm1 - W(k + m - 1) * pmm) / W(k - m);
+        pmm = pm1;
+        pm1 = p2;
+    }
+    return detail::sf::from_w<T>(pm1);
+}
+/// Spherical harmonic angular part Y_l^m(theta, 0) for a quaternion polar angle theta
+/// (the <cmath> std::sph_legendre convention, including the Condon-Shortley phase).
+template <class T>
+[[nodiscard]] inline quaternion<T> sph_legendre(unsigned l, unsigned m, const quaternion<T>& theta) {
+    QUAT_SF_W;
+    if (m > l) return quaternion<T>();
+    const auto t = detail::sf::to_w(theta);
+    const quaternion<W> x = cos(t), s = sin(t);
+    // normalized recurrence: Ybar_l^m = N_l^m P_l^m with N = sqrt((2l+1)/(4pi) (l-m)!/(l+m)!)
+    const W pi = detail::pi_v<W>;
+    W lnorm = W(0.5) * (std::log(W(2 * m + 1) / (W(4) * pi)) - std::lgamma(W(2 * m + 1)));
+    // (2m-1)!! in log form
+    for (unsigned i = 1; i <= m; ++i) lnorm += std::log(W(2 * i - 1));
+    quaternion<W> ymm = std::exp(lnorm) * pow(s, static_cast<int>(m));
+    if (m % 2 == 1) ymm = -ymm;
+    if (l == m) return detail::sf::from_w<T>(ymm);
+    quaternion<W> y1 = std::sqrt(W(2 * m + 3)) * x * ymm;
+    for (unsigned k = m + 2; k <= l; ++k) {
+        const W kk = W(k), mm = W(m);
+        const W a = std::sqrt((W(4) * kk * kk - W(1)) / (kk * kk - mm * mm));
+        const W b = std::sqrt(((kk - W(1)) * (kk - W(1)) - mm * mm) / (W(4) * (kk - W(1)) * (kk - W(1)) - W(1)));
+        quaternion<W> y2 = a * (x * y1 - b * ymm);
+        ymm = y1;
+        y1 = y2;
+    }
+    return detail::sf::from_w<T>(y1);
+}
+/// Physicists' Hermite polynomial H_n(q).
+template <class T>
+[[nodiscard]] inline quaternion<T> hermite(unsigned n, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const auto x = detail::sf::to_w(q);
+    quaternion<W> h0(W(1)), h1 = W(2) * x;
+    if (n == 0) return detail::sf::from_w<T>(h0);
+    for (unsigned k = 1; k < n; ++k) {
+        quaternion<W> h2 = W(2) * x * h1 - W(2 * k) * h0;
+        h0 = h1;
+        h1 = h2;
+    }
+    return detail::sf::from_w<T>(h1);
+}
+/// Associated (generalized) Laguerre polynomial L_n^m(q); laguerre(n, q) = L_n^0(q).
+template <class T>
+[[nodiscard]] inline quaternion<T> assoc_laguerre(unsigned n, unsigned m, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const auto x = detail::sf::to_w(q);
+    const W a = W(m);
+    quaternion<W> l0(W(1)), l1 = W(1) + a - x;
+    if (n == 0) return detail::sf::from_w<T>(l0);
+    for (unsigned k = 1; k < n; ++k) {
+        quaternion<W> l2 = ((W(2 * k + 1) + a - x) * l1 - (W(k) + a) * l0) / W(k + 1);
+        l0 = l1;
+        l1 = l2;
+    }
+    return detail::sf::from_w<T>(l1);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> laguerre(unsigned n, const quaternion<T>& q) {
+    return assoc_laguerre(n, 0u, q);
+}
+/// Chebyshev polynomials of the first and second kind T_n(q), U_n(q).
+template <class T>
+[[nodiscard]] inline quaternion<T> chebyshev_t(unsigned n, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const auto x = detail::sf::to_w(q);
+    quaternion<W> t0(W(1)), t1 = x;
+    if (n == 0) return detail::sf::from_w<T>(t0);
+    for (unsigned k = 1; k < n; ++k) {
+        quaternion<W> t2 = W(2) * x * t1 - t0;
+        t0 = t1;
+        t1 = t2;
+    }
+    return detail::sf::from_w<T>(t1);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> chebyshev_u(unsigned n, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const auto x = detail::sf::to_w(q);
+    quaternion<W> u0(W(1)), u1 = W(2) * x;
+    if (n == 0) return detail::sf::from_w<T>(u0);
+    for (unsigned k = 1; k < n; ++k) {
+        quaternion<W> u2 = W(2) * x * u1 - u0;
+        u0 = u1;
+        u1 = u2;
+    }
+    return detail::sf::from_w<T>(u1);
+}
+
+// ---- elliptic integrals (std convention: modulus k, characteristic nu in 1 - nu sin^2) ----
+/// K(k) for a quaternion modulus k.
+template <class T>
+[[nodiscard]] inline quaternion<T> comp_ellint_1(const quaternion<T>& k) {
+    QUAT_SF_W;
+    return detail::sf::lift(k, [](const QUAT_SF_C& z) { return detail::sf::comp_ellint_1k(z); },
+                            [](W x) { return std::abs(x) <= W(1); });
+}
+/// E(k) for a quaternion modulus k.
+template <class T>
+[[nodiscard]] inline quaternion<T> comp_ellint_2(const quaternion<T>& k) {
+    QUAT_SF_W;
+    return detail::sf::lift(k, [](const QUAT_SF_C& z) { return detail::sf::comp_ellint_2k(z); },
+                            [](W x) { return std::abs(x) <= W(1); });
+}
+/// Pi(nu, k) for real modulus |k| <= 1 and a quaternion characteristic nu.
+template <class T>
+[[nodiscard]] inline quaternion<T> comp_ellint_3(std::type_identity_t<T> k, const quaternion<T>& nu) {
+    QUAT_SF_W;
+    const W kk = static_cast<W>(k);
+    return detail::sf::lift(nu, [kk](const QUAT_SF_C& z) { return detail::sf::comp_ellint_3n(kk, z); },
+                            [](W x) { return x < W(1); });
+}
+/// F(k, phi) for real |k| <= 1 and a quaternion amplitude phi.
+template <class T>
+[[nodiscard]] inline quaternion<T> ellint_1(std::type_identity_t<T> k, const quaternion<T>& phi) {
+    QUAT_SF_W;
+    const W kk = static_cast<W>(k);
+    return detail::sf::lift(phi, [kk](const QUAT_SF_C& z) { return detail::sf::ellint_1p(kk, z); },
+                            [kk](W) { return std::abs(kk) <= W(1); });
+}
+/// E(k, phi) for real |k| <= 1 and a quaternion amplitude phi.
+template <class T>
+[[nodiscard]] inline quaternion<T> ellint_2(std::type_identity_t<T> k, const quaternion<T>& phi) {
+    QUAT_SF_W;
+    const W kk = static_cast<W>(k);
+    return detail::sf::lift(phi, [kk](const QUAT_SF_C& z) { return detail::sf::ellint_2p(kk, z); },
+                            [kk](W) { return std::abs(kk) <= W(1); });
+}
+/// Pi(nu, k, phi) for real k, real phi and a quaternion characteristic nu.
+template <class T>
+[[nodiscard]] inline quaternion<T> ellint_3(std::type_identity_t<T> k, const quaternion<T>& nu,
+                                            std::type_identity_t<T> phi) {
+    QUAT_SF_W;
+    const W kk = static_cast<W>(k), ph = static_cast<W>(phi);
+    return detail::sf::lift(nu, [kk, ph](const QUAT_SF_C& z) { return detail::sf::ellint_3n(kk, z, ph); },
+                            [ph](W x) { const W s = std::sin(ph); return x * s * s < W(1); });
+}
+
+// ---- exponential, sine/cosine and Fresnel integrals ----------------------------------------
+/// Ei(q) (exponential integral; on the real axis the real principal value as std::expint).
+template <class T>
+[[nodiscard]] inline quaternion<T> expint(const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::expint_ei(z); }, true);
+}
+/// E_n(q) = int_1^inf e^{-qt} t^{-n} dt (E_1 is the exponential integral E1).
+template <class T>
+[[nodiscard]] inline quaternion<T> expint(unsigned n, const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(
+        q,
+        [n](const QUAT_SF_C& z) -> QUAT_SF_C {
+            using namespace detail::sf;
+            if (n == 0) return std::exp(-z) / z;
+            if (n == 1) return expint_e1(z);
+            if (z == QUAT_SF_C()) return {W(1) / W(n - 1), W()};
+            return std::exp(W(n - 1) * std::log(z)) * gamma_upper(W(1) - W(n), z);
+        },
+        [n](W x) { return x > W() || (n > 1 && x == W()); });
+}
+/// Sine integral Si(q) (entire) and cosine integral Ci(q).
+template <class T>
+[[nodiscard]] inline quaternion<T> sinint(const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::sici(z, false); }, true);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> cosint(const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::sici(z, true); },
+                            [](W x) { return x > W(); });
+}
+/// Fresnel integrals S(q) = int_0^q sin(pi t^2/2) dt and C(q) (entire).
+template <class T>
+[[nodiscard]] inline quaternion<T> fresnel_s(const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::fresnel(z, true); }, true);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> fresnel_c(const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::fresnel(z, false); }, true);
+}
+
+// ---- polygamma, Hurwitz zeta, polylogarithm, Lambert W ------------------------------------
+/// psi^(m)(q), the m-th derivative of the digamma function.
+template <class T>
+[[nodiscard]] inline quaternion<T> polygamma(unsigned m, const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::polygamma_k(m, z); }, true);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> trigamma(const quaternion<T>& q) {
+    return polygamma(1u, q);
+}
+/// Hurwitz zeta zeta(s, a) for a quaternion s and real a (a not a non-positive integer).
+template <class T>
+[[nodiscard]] inline quaternion<T> hurwitz_zeta(const quaternion<T>& s, std::type_identity_t<T> a) {
+    QUAT_SF_W;
+    const W wa = static_cast<W>(a);
+    return detail::sf::lift(s, [wa](const QUAT_SF_C& z) { return detail::sf::hurwitz_zeta_k(z, QUAT_SF_C(wa)); },
+                            [wa](W) { return wa > W(); });
+}
+/// Polylogarithm Li_s(q) for real s (cut [1, inf) on the real axis).
+template <class T, class N>
+    requires std::is_arithmetic_v<N>
+[[nodiscard]] inline quaternion<T> polylog(N s, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W ws = static_cast<W>(s);
+    return detail::sf::lift(q, [ws](const QUAT_SF_C& z) { return detail::sf::polylog_k(ws, z); },
+                            [](W x) { return x <= W(1); });
+}
+/// Lambert W, branch k (k = 0 is the principal branch).
+template <class T>
+[[nodiscard]] inline quaternion<T> lambert_w(int k, const quaternion<T>& q) {
+    QUAT_SF_W;
+    return detail::sf::lift(q, [k](const QUAT_SF_C& z) { return detail::sf::lambert_w_k(k, z); },
+                            [k](W x) {
+                                const W e1 = W(1) / std::exp(W(1));
+                                if (k == 0) return x >= -e1;
+                                if (k == -1) return x >= -e1 && x < W();
+                                return false;
+                            });
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> lambert_w(const quaternion<T>& q) {
+    return lambert_w(0, q);
+}
+
+// ---- incomplete gamma and beta (real parameters) ------------------------------------------
+/// Upper incomplete gamma Gamma(a, q) and lower gamma(a, q), real a.
+template <class T>
+[[nodiscard]] inline quaternion<T> tgamma_upper(std::type_identity_t<T> a, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W wa = static_cast<W>(a);
+    return detail::sf::lift(q, [wa](const QUAT_SF_C& z) { return detail::sf::gamma_upper(wa, z); },
+                            [wa](W x) { return x > W() || (detail::sf::is_integer(wa) && wa > W()); });
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> tgamma_lower(std::type_identity_t<T> a, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W wa = static_cast<W>(a);
+    return detail::sf::lift(q, [wa](const QUAT_SF_C& z) { return detail::sf::gamma_lower(wa, z); },
+                            [wa](W x) { return x >= W() || (detail::sf::is_integer(wa) && wa > W()); });
+}
+/// Regularized P(a, q) = gamma(a, q)/Gamma(a) and Q(a, q) = Gamma(a, q)/Gamma(a), a > 0.
+template <class T>
+[[nodiscard]] inline quaternion<T> gamma_p(std::type_identity_t<T> a, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W wa = static_cast<W>(a);
+    return detail::sf::lift(
+        q,
+        [wa](const QUAT_SF_C& z) {
+            return wa > W() ? detail::sf::gamma_pq(wa, z).p : QUAT_SF_C(detail::sf::nan<W>(), W());
+        },
+        [wa](W x) { return x >= W() || detail::sf::is_integer(wa); });
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> gamma_q(std::type_identity_t<T> a, const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W wa = static_cast<W>(a);
+    return detail::sf::lift(
+        q,
+        [wa](const QUAT_SF_C& z) {
+            return wa > W() ? detail::sf::gamma_pq(wa, z).q : QUAT_SF_C(detail::sf::nan<W>(), W());
+        },
+        [wa](W x) { return x >= W() || detail::sf::is_integer(wa); });
+}
+/// Regularized incomplete beta I_q(a, b) and its complement 1 - I_q(a, b), real a, b > 0.
+template <class T>
+[[nodiscard]] inline quaternion<T> ibeta(std::type_identity_t<T> a, std::type_identity_t<T> b,
+                                         const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W wa = static_cast<W>(a), wb = static_cast<W>(b);
+    return detail::sf::lift(q, [wa, wb](const QUAT_SF_C& z) { return detail::sf::ibeta_k(wa, wb, z); },
+                            [](W x) { return x >= W() && x <= W(1); });
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> ibetac(std::type_identity_t<T> a, std::type_identity_t<T> b,
+                                          const quaternion<T>& q) {
+    QUAT_SF_W;
+    const W wa = static_cast<W>(a), wb = static_cast<W>(b);
+    return detail::sf::lift(
+        q, [wa, wb](const QUAT_SF_C& z) { return W(1) - detail::sf::ibeta_k(wa, wb, z); },
+        [](W x) { return x >= W() && x <= W(1); });
+}
+
+#undef QUAT_SF_W
+#undef QUAT_SF_C
 
 }  // namespace quat
 
