@@ -141,6 +141,11 @@ def reference(fn, p1, x, y):
     if fn == "lgamma": return mp.loggamma(z)
     if fn == "expint":  # absolute next to the real zero of Ei (x = 0.3725...)
         s = max(s, min(mp.mpf(1), abs(mp.exp(z)) / 8))
+    if fn == "hurwitz_zeta" and x < 0:
+        # Left of 0, zeta(s, a) has real zeros where the terms (a + n)^-s with a + n < 0
+        # cancel; the accuracy there is relative to the largest such term.
+        n_max = int(mp.ceil(-x)) + 1
+        s = max(s, max(abs(mp.power(z + n, -p1)) for n in range(n_max + 1) if z + n != 0))
     if fn == "digamma": return mp.digamma(z)
     if fn == "erf": return mp.erf(z)
     if fn == "erfc": return mp.erfc(z)

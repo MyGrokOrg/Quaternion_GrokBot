@@ -18,6 +18,7 @@ Accuracy figures are worst-case errors against mpmath on random exact inputs (30
 * **Fix (found by the manual fuzz run for this change, seed 2871196519):** `cyl_neumann`/`cyl_hankel_1` at large order and tiny |z| returned NaN when H⁽¹⁾_{ν+1} overflowed but the result did not. Example: ν ≈ 75, |z| ≈ 4.4e-3, Y ≈ −1.24e306. J, which is then below the smallest normal number, is now returned as 0, and Y/H⁽¹⁾ are now exact to < 1e-12 (before: NaN). Test `neumann_near_overflow`.
 * **Fuzz script:**
   * Results within 2¹² of the largest finite value are skipped. Another Bessel intermediate still overflows there: Y_ν at ν = 84.5, |z| ≈ 0.014 gives −inf for Im Y ≈ −1.87e307 (seed 1304285165, clang-18/libc++). This is a documented limit.
+  * Hurwitz ζ(s, a) with Re a < 0 is now measured against the largest term |a + n|^−s, because the terms cancel at its real zeros. One example from seed 1842008100: s = 0.83, a = −5.41, ζ ≈ 5.9e-4 measured 360 ε relative, which is about 1 ε of the largest term.
   * The Airy bound is now 128 ε, because the condition number grows like |z|^{3/2}. The largest error seen was 69.6 ε in long double at z ≈ −18.6 + 5.8i.
 * **Tests:**
   * `std_format`: 23 new checks across 3 types, including error cases.
