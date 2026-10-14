@@ -136,6 +136,9 @@ void special() {
     add<T>("zeta", "zeta(1/2+i 1e4)", axis_pts<T>(T(0.5), T(1e4)), [](const Q<T>& q) { return quat::riemann_zeta(q); });
     add<T>("zeta", "zeta(2+i 1e4)", axis_pts<T>(T(2), T(1e4)), [](const Q<T>& q) { return quat::riemann_zeta(q); });
     add<T>("zeta", "zeta(1/2+i 1e5)", axis_pts<T>(T(0.5), T(1e5)), [](const Q<T>& q) { return quat::riemann_zeta(q); });
+    add<T>("zeta", "hurwitz(-1/2+20i,2.75)", axis_pts<T>(T(-0.5), T(20)), [](const Q<T>& q) { return quat::hurwitz_zeta(q, T(2.75)); });
+    add<T>("zeta", "hurwitz(-7/4+120i,1.25)", axis_pts<T>(T(-1.75), T(120)), [](const Q<T>& q) { return quat::hurwitz_zeta(q, T(1.25)); });
+    add<T>("zeta", "polylog(1/2,-3+i)", axis_pts<T>(T(-3), T(1)), [](const Q<T>& q) { return quat::polylog(T(0.5), q); });
 }
 }  // namespace
 

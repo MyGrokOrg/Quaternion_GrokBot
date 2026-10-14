@@ -1819,13 +1819,32 @@ template <class T>
     }
     const T twopi = T(2) * pi<T>;
     const cplx<T> I = de_half_infinite<T>([&](T t) -> cplx<T> {
-        const cplx<T> lm = std::log(cplx<T>(a.real(), a.imag() - t));
-        const cplx<T> lp = std::log(cplx<T>(a.real(), a.imag() + t));
-        if (t <= T(1)) return mul_mi(std::exp(-s * lm) - std::exp(-s * lp)) / std::expm1(twopi * t);
+        // (a - it)^{-s} - (a + it)^{-s} = e^{-sc} (e^{sd} - e^{-sd}), with
+        //   c = (log(a - it) + log(a + it))/2,  d = (log(a + it) - log(a - it))/2 = atanh(it/a),
+        // d from log1p(w) - log1p(-w) (no cancellation: the two terms have opposite signs).
+        // Subtracting the two powers directly cancels like t -> 0, and is exact only if the
+        // two products s*log(a -+ it) round symmetrically, which FMA contraction breaks
+        // (a 1-ulp asymmetry divided by e^{2 pi t} - 1 ~ 2 pi t overflowed to -inf).
+        // Real a (the usual case): c = log|a + it|, d = i atan(t/a).
+        cplx<T> c, d;
+        if (a.imag() == T()) {
+            c = std::log(std::hypot(a.real(), t));
+            d = {T(), std::atan2(t, a.real())};
+        } else {
+            const cplx<T> w = cdiv(cplx<T>(T(), t), a);
+            c = (std::log(cplx<T>(a.real(), a.imag() - t)) + std::log(cplx<T>(a.real(), a.imag() + t))) / T(2);
+            d = (log1p(w) - log1p(-w)) / T(2);
+        }
         // for larger t divide by e^{2 pi t} - 1 inside the exponentials, so that the
         // factors e^{|Im s| atan(t/a)} cannot overflow
-        const T ld = twopi * t + std::log1p(-std::exp(-twopi * t));
-        return mul_mi(std::exp(-s * lm - ld) - std::exp(-s * lp - ld));
+        const bool big = t > T(1);
+        const T ld = big ? twopi * t + std::log1p(-std::exp(-twopi * t)) : T();
+        const cplx<T> X = -s * c - ld, Y = s * d;  // (c real or not, d imaginary or not)
+        // e^{X+Y} - e^{X-Y}: as 2 e^X sinh(Y) where that difference is small (|Re Y| <= 1);
+        // otherwise the two terms differ in size and are formed separately (no overflow).
+        const cplx<T> diff = std::abs(Y.real()) <= T(1) ? T(2) * std::exp(X) * std::sinh(Y)
+                                                        : std::exp(X + Y) - std::exp(X - Y);
+        return big ? mul_mi(diff) : mul_mi(diff) / std::expm1(twopi * t);
     });
     const cplx<T> la = std::log(a);
     return head + std::exp(-s * la) / T(2) + cdiv(std::exp((T(1) - s) * la), s - T(1)) + I;

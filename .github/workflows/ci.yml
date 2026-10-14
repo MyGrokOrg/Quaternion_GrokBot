@@ -93,9 +93,7 @@ jobs:
           ctest --test-dir build-clang --output-on-failure
           cmake -B build-gcc -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-march=haswell
           cmake --build build-gcc -j
-          # special2 is excluded for GCC + FMA: hurwitz_zeta "strip/large Im s" already fails
-          # there at the baseline commit (a pre-existing contraction issue, tracked separately).
-          ctest --test-dir build-gcc --output-on-failure -E special2
+          ctest --test-dir build-gcc --output-on-failure
 
   benchmarks:
     # Informational only: never fails the workflow; results are uploaded as an artifact.

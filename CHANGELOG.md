@@ -2,6 +2,45 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## Fix: Hurwitz ζ with FMA contraction (GCC 14 `-march=haswell`)
+
+* **Symptom.** With GCC 14 and `-march=haswell`, `test_special2` failed 13 `hurwitz_zeta` checks:
+  * float and double returned `-inf` at s = −1.75 + 120i and −1.25 + 120i (a = 1.25);
+  * double errors reached 25–103 |s|ε at |Im s| = 20 and 120.
+* **Root cause.** The Hermite-integral path formed (a − it)^{−s} − (a + it)^{−s} as exp(−s·log(a − it)) − exp(−s·log(a + it)) and divided by e^{2πt} − 1 ≈ 2πt. For real `a`, the two logarithms are exact conjugates, and without FMA the products s·log(a ∓ it) round symmetrically, so their difference vanishes like t.
+  * GCC contracts the complex product into `fma(si, L, ±sr·θ)`. When si·L lies at or next to a rounding tie, the tiny ±sr·θ (θ ≈ t/a) breaks the tie in opposite directions.
+  * The imaginary parts of the two exponents then differ by 1 ulp for every small t (shown with t = 1e-320 … 1e-30: `-0x1.7e9c28928a349p+8` against `…348p+8`).
+  * That difference, roughly ε·|a^{−s}|, divided by 2πt overflowed at the double-exponential nodes near t = 1e-320, which gave `-inf`. At larger t it added about ε/t per node, which gave the 25–103 |s|ε errors.
+  * Clang contracted differently and happened to pass.
+* **Fix (contraction-robust, no flags).** The difference is now e^{−s·c}·(e^{s·d} − e^{−s·d}), with c = log|a + it| and d = i·atan(t/a) for real `a`. For complex `a` (polylog), d = atanh(it/a) = (log1p(w) − log1p(−w))/2, which has no cancellation.
+  * It is evaluated as 2·e^X·sinh(Y) when |Re Y| ≤ 1; otherwise the two exponentials are formed separately as before, so nothing can overflow.
+  * The small difference is no longer obtained by subtraction, so it no longer depends on how the products are rounded.
+* **Errors against mpmath** (161 references in `test_special2`, worst in |s|ε):
+
+  | Build | Before | After |
+  |---|---|---|
+  | GCC 14 `-march=haswell`, float | inf | 0 |
+  | GCC 14 `-march=haswell`, double | inf (2 × `-inf`; others up to 103) | 2.58 |
+  | GCC 14 `-march=haswell`, long double | 3.69 | 3.69 |
+  | Without FMA, double / long double | 2.58 / 3.69 | 2.58 / 3.69 |
+
+  A random sweep of 150 points (Re s ∈ (−2, 0.5), |Im s| ∈ [8, 150], a ∈ {0.375, …, 4.5}) gives:
+  * double: max 1.89 → 1.87 without FMA, and 2.27 → 1.87 with FMA;
+  * long double: 2.1 → 1.78.
+* **Speed.** The real-`a` path now needs one real log and one atan2 per node instead of two complex logs. Medians of 5 alternating runs, `-O3`:
+
+  | Case | double, new/old | long double, new/old |
+  |---|---|---|
+  | `hurwitz(−1/2+20i, 2.75)` | 0.88 (GCC), 0.54 (GCC haswell), 0.91 (Clang 19) | 0.91–0.93 |
+  | `hurwitz(−7/4+120i, 1.25)` | 0.20–0.23 | 0.14 |
+  | `polylog(1/2, −3+i)` (unchanged path) | 0.98–1.03 | 0.88–1.03 |
+
+  The large-|Im s| case was slow before because the cancellation noise made the double-exponential rule refine further.
+* **Other checks.**
+  * `test_bitident` still passes; the arithmetic is untouched.
+  * The haswell CI job no longer skips `special2` for GCC.
+  * New bench cases: `hurwitz(...)` ×2 and `polylog(1/2,-3+i)`.
+
 ## constexpr without transcendentals (step 1)
 
 * **Now `constexpr` on GCC 14, Clang 18/19, libstdc++ and libc++:**
@@ -33,7 +72,7 @@ Accuracy figures are worst-case errors against mpmath on random exact inputs (30
   * In FMA builds, a constexpr product or quotient can differ in the last bits from the contracted runtime one.
   * A constexpr `abs` can differ from the runtime one by 1 ulp: the constexpr `hypot` is correctly rounded, glibc's is not always.
   * Operations that would produce a NaN (or, on GCC, overflow) are not constant expressions, so Annex G special-value results are runtime-only.
-* **Found while testing (pre-existing, not changed here).** With GCC 14 and `-march=haswell`, `hurwitz_zeta` fails 13 checks in `test_special2` ("strip/large Im s"), including `-inf` results. This already happens at 91cad1a. Clang 18/19 with `-march=haswell` pass. The haswell CI job excludes `special2` for GCC until this is fixed.
+* **Found while testing (pre-existing, not changed here).** With GCC 14 and `-march=haswell`, `hurwitz_zeta` failed 13 checks in `test_special2`. Fixed since: see "Fix: Hurwitz ζ with FMA contraction" above.
 * **Tests.**
   * `test_constexpr`: `static_assert`s for the helpers and the operations.
   * Checks that 256 constexpr quotients per type match the runtime ones on non-FMA builds.

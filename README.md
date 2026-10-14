@@ -247,7 +247,7 @@ These also use axis reduction. Real parameters such as orders, degrees, moduli a
 * **Hurwitz ζ** picks one of three methods:
   * Hurwitz's Fourier formula (DLMF 25.11.9) for real `a`, Re s ≤ −2 and |Im s| > 8.
   * Euler–Maclaurin for Re s ≥ ½ and |Im s| ≤ 15.
-  * Hermite's integral (DLMF 25.11.29) everywhere else. Before integrating, `a` is shifted by the recurrence so that Re a ≈ max(1, 1.3·|Im s|/2π). That makes the factor e^{|Im s|·atan(t/a)} small next to e^{−2πt}, so the integral does not cancel. The integrand is formed in logarithmic form so it cannot overflow for large |Im s|.
+  * Hermite's integral (DLMF 25.11.29) everywhere else. Before integrating, `a` is shifted by the recurrence so that Re a ≈ max(1, 1.3·|Im s|/2π). That makes the factor e^{|Im s|·atan(t/a)} small next to e^{−2πt}, so the integral does not cancel. The integrand is formed in logarithmic form so it cannot overflow for large |Im s|. The difference (a − it)^{−s} − (a + it)^{−s} is computed as 2·e^{−s·c}·sinh(s·d), with c = log|a + it| and d = i·atan(t/a) (for complex `a`, d = atanh(it/a) via `log1p`). It is never formed by subtracting the two powers, which cancels as t → 0 and is not robust under FMA contraction.
 * **Li_s** uses the power series, or the expansion in log z, or inversion. The inversion uses Bernoulli polynomials for integer s and Jonquière's formula otherwise.
 * **Lambert W** uses Halley iteration. The start is the branch-point series or the asymptotic expansion.
   * Near −1/e (|W + 1| < ½), the result is refined by Newton iteration on d = W + 1 against the residual e⁻¹g(d) − (z + 1/e), where g(d) = (d − 1)eᵈ + 1 is summed as a series. This form has no cancellation.
