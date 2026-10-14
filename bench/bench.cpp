@@ -77,6 +77,12 @@ void core() {
     add<T>("core", "abs", in, [](const Q<T>& q) { return Q<T>(quat::abs(q)); });
     add<T>("core", "inverse", in, [](const Q<T>& q) { return quat::inverse(q); });
     add<T>("core", "rotate", in, [p](const Q<T>& q) { return p * q * quat::conj(p); });
+    add<T>("core", "scalar_div", in, [](const Q<T>& q) { return T(1.5) / q; });
+    add<T>("core", "norm", in, [](const Q<T>& q) { return Q<T>(quat::norm(q)); });
+    add<T>("core", "normalize", in, [](const Q<T>& q) { return quat::normalize(q); });
+    add<T>("core", "proj", in, [](const Q<T>& q) { return quat::proj(q); });
+    add<T>("core", "pow_int", in, [](const Q<T>& q) { return quat::pow(q, 5); });
+    add<T>("core", "pow_neg_int", in, [](const Q<T>& q) { return quat::pow(q, -3); });
 }
 template <class T>
 void elementary() {

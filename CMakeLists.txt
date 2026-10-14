@@ -20,7 +20,7 @@ option(QUATERNION_BUILD_BENCHMARKS "Build the benchmark suite (bench/)" OFF)
 include(CTest)
 
 if(BUILD_TESTING AND PROJECT_IS_TOP_LEVEL)
-    foreach(t core math io special special2 annexg)
+    foreach(t core math io special special2 annexg constexpr bitident)
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE quaternion)
         if(MSVC)
@@ -30,6 +30,11 @@ if(BUILD_TESTING AND PROJECT_IS_TOP_LEVEL)
         endif()
         add_test(NAME ${t} COMMAND test_${t})
     endforeach()
+    # The constexpr helpers' error-free transformations are also run at run time in this test.
+    if(NOT MSVC)
+        target_compile_options(test_constexpr PRIVATE -ffp-contract=off)
+    endif()
+    target_include_directories(test_bitident PRIVATE tests)
     # Evaluator for the nightly mpmath fuzz job (fuzz/fuzz.py, .github/workflows/fuzz.yml);
     # built with the tests so that it keeps compiling on every toolchain.
     add_executable(quaternion_fuzz_eval fuzz/fuzz_eval.cpp)

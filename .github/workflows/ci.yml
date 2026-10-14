@@ -52,6 +52,51 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  bitident-haswell:
+    # Runtime results of the transcendental-free operations must not change with the
+    # constexpr work: compile tests/bitident/dump.cpp against the header at the baseline
+    # commit and against this one (same compiler, same flags, with FMA contraction) and
+    # compare the raw result bits; then run the test suites in the haswell build.
+    name: bit-identity (haswell)
+    runs-on: ubuntu-24.04
+    env:
+      BASELINE: 91cad1a
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check the CPU has FMA/AVX2
+        run: grep -qw fma /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo
+      - name: Baseline headers
+        run: |
+          mkdir -p old/quaternion
+          git show $BASELINE:include/quaternion.hpp > old/quaternion.hpp
+          git show $BASELINE:include/quaternion/quaternion.hpp > old/quaternion/quaternion.hpp
+          git show $BASELINE:include/quaternion/special_functions.hpp > old/quaternion/special_functions.hpp
+      - name: Old vs new raw bits
+        run: |
+          set -e
+          for cxx in g++-14 clang++-18; do
+            for opt in -O2 -O3; do
+              $cxx -std=c++23 $opt -march=haswell -Iold/quaternion tests/bitident/dump.cpp -o dump_old
+              $cxx -std=c++23 $opt -march=haswell -Iinclude/quaternion tests/bitident/dump.cpp -o dump_new
+              ./dump_old > old.txt; ./dump_new > new.txt
+              echo "$cxx $opt: $(wc -l < new.txt) hashes"
+              diff old.txt new.txt
+            done
+          done
+      - name: Test suites (-march=haswell)
+        run: |
+          set -e
+          cmake -B build-clang -DCMAKE_CXX_COMPILER=clang++-18 -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-march=haswell
+          cmake --build build-clang -j
+          ctest --test-dir build-clang --output-on-failure
+          cmake -B build-gcc -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-march=haswell
+          cmake --build build-gcc -j
+          # special2 is excluded for GCC + FMA: hurwitz_zeta "strip/large Im s" already fails
+          # there at the baseline commit (a pre-existing contraction issue, tracked separately).
+          ctest --test-dir build-gcc --output-on-failure -E special2
+
   benchmarks:
     # Informational only: never fails the workflow; results are uploaded as an artifact.
     runs-on: ubuntu-24.04

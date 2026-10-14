@@ -2,6 +2,44 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## constexpr without transcendentals (step 1)
+
+* **Now `constexpr` on GCC 14, Clang 18/19, libstdc++ and libc++:**
+  * all arithmetic, including the Annex G division (previously `p * inverse(q)` in constant expressions; it now runs the same scaled algorithm as at run time);
+  * `abs`, `normalize` and `proj`, joining `norm`, `conj`, `inverse`, `dot`, `cross`, integer `pow` and the comparisons, which already were.
+* **New internal helpers** `quat::detail::cx::{isnan, isinf, isfinite, signbit, fabs, copysign, logb, ilogb, scalbn, ldexp, frexp, sqrt, hypot}`.
+  * They use `std::bit_cast` for float, double and x87 `long double`, with an exact arithmetic fallback for other formats.
+  * They are used only in constant evaluation (`if consteval`); at run time the same `std::` calls as before run.
+  * `scalbn`, `logb`, `frexp` and `sqrt` match glibc bit for bit on 200,000 inputs per type.
+  * `hypot` is correctly rounded. It differs from glibc's `hypot` in 0.2–0.4% of inputs (1 ulp each), and in all 300 double cases checked with mpmath ours was the closer one.
+* **Runtime bit-identity (condition 1).**
+  * `test_bitident` compares hashes of 15 operation groups (1,600 input pairs per type, including special values, subnormals and near-overflow values) with golden hashes from commit 91cad1a. It passes on every CI toolchain in Debug, Release and with sanitizers.
+  * The new CI job *bit-identity (haswell)* compiles the corpus against the old and the new header with GCC 14 and Clang 18 at `-O2`/`-O3 -march=haswell` and diffs the raw bits; locally all four comparisons are identical.
+  * FMA builds have no golden hash, because their contraction pattern changes with the optimization level.
+* **No contraction change (condition 2).**
+  * No `-ffp-contract=off` or pragma was added to library code. Disabling contraction in the runtime code would itself change results on FMA builds and break condition 1. Only the test target `test_constexpr` is compiled with `-ffp-contract=off`, because it runs the helpers' error-free transformations at run time.
+  * Benchmarks: `bench --filter core`, 12 cases × 3 types, median of 5 alternating runs of the old and new header, `-O3`. New/old geometric mean (min–max):
+
+    | Build | Geometric mean | Range |
+    |---|---|---|
+    | GCC 14 | 0.999 | 0.970–1.047 |
+    | GCC 14 `-march=haswell` | 0.990 | 0.911–1.030 |
+    | Clang 19 | 0.992 | 0.940–1.048 |
+    | Clang 19 `-march=haswell` | 1.010 | 0.957–1.056 |
+
+    The spread is run-to-run noise. Examples, double, ns/call (old → new): `div` 46.9 → 47.4 (GCC) and 43.6 → 44.0 (Clang); `abs` 18.7 → 18.7 (GCC) and 18.9 → 19.0 (Clang); long double `div` 377.7 → 375.6 (GCC).
+  * New bench cases: `scalar_div`, `norm`, `normalize`, `proj`, `pow_int`, `pow_neg_int`.
+* **Limits.**
+  * In FMA builds, a constexpr product or quotient can differ in the last bits from the contracted runtime one.
+  * A constexpr `abs` can differ from the runtime one by 1 ulp: the constexpr `hypot` is correctly rounded, glibc's is not always.
+  * Operations that would produce a NaN (or, on GCC, overflow) are not constant expressions, so Annex G special-value results are runtime-only.
+* **Found while testing (pre-existing, not changed here).** With GCC 14 and `-march=haswell`, `hurwitz_zeta` fails 13 checks in `test_special2` ("strip/large Im s"), including `-inf` results. This already happens at 91cad1a. Clang 18/19 with `-march=haswell` pass. The haswell CI job excludes `special2` for GCC until this is fixed.
+* **Tests.**
+  * `test_constexpr`: `static_assert`s for the helpers and the operations.
+  * Checks that 256 constexpr quotients per type match the runtime ones on non-FMA builds.
+  * The helper sweeps described above.
+* **README.** New "constexpr" section with the feasibility study: GCC folding coverage, Clang/libc++ coverage, P0533/P1383 status, special values that never fold, fold-vs-runtime differences of 1,118/16,800 (double) and 1,604/16,800 (long double), 2,047/4,000 contraction differences with `-march=haswell` against 0 with `-ffp-contract=off`, and the 1,500–2,500 line estimate. Also the plan for steps 3 and 4.
+
 ## std::format width for the whole quaternion; mixed-precision operators
 
 * **Formatting (behavior change).**

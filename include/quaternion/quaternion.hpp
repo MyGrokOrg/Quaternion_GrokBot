@@ -7,10 +7,12 @@
 #define QUATERNION_QUATERNION_HPP
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <complex>
 #include <concepts>
 #include <cstddef>
+#include <cstdint>
 #include <format>
 #include <istream>
 #include <iterator>
@@ -43,6 +45,233 @@ inline constexpr T ln10_v = static_cast<T>(2.30258509299404568401799145468436420
 template <class T>
 inline constexpr T egamma_v = static_cast<T>(0.577215664901532860606512090082402431L);
 
+// ---- constexpr floating-point helpers -------------------------------------------
+// <cmath> is not constexpr on Clang or libc++ before C++26 (P1383), so the
+// transcendental-free operations use these in constant evaluation.  Every runtime branch
+// calls the same std:: function as before, so runtime results and code are unchanged.
+// Special values in constant evaluation: operations that would produce a NaN, or (on GCC)
+// overflow, are not constant expressions, so only the finite paths need to be exact here.
+namespace cx {
+template <class T>
+constexpr bool isnan(T x) noexcept { return x != x; }
+template <class T>
+constexpr bool isinf(T x) noexcept {
+    return x == std::numeric_limits<T>::infinity() || x == -std::numeric_limits<T>::infinity();
+}
+template <class T>
+constexpr bool isfinite(T x) noexcept { return !isnan(x) && !isinf(x); }
+
+// Sign bit (also of zeros and NaNs) through std::bit_cast of the representation.
+template <class T>
+constexpr bool signbit(T x) noexcept {
+    using L = std::numeric_limits<T>;
+    if constexpr (sizeof(T) == 4 && L::digits == 24) {
+        return (std::bit_cast<std::uint32_t>(x) >> 31) != 0;
+    } else if constexpr (sizeof(T) == 8 && L::digits == 53) {
+        return (std::bit_cast<std::uint64_t>(x) >> 63) != 0;
+    } else if constexpr (L::digits == 64 && sizeof(T) == 16) {  // x87 80-bit in 16 bytes
+        struct rep { std::uint64_t m; std::uint16_t se; };
+        static_assert(std::endian::native == std::endian::little);
+        return (std::bit_cast<rep>(x).se >> 15) != 0;
+    } else if constexpr (L::digits == 113 && sizeof(T) == 16) {  // IEEE binary128
+        struct rep { std::uint64_t w[2]; };
+        const rep r = std::bit_cast<rep>(x);
+        return (r.w[std::endian::native == std::endian::little ? 1 : 0] >> 63) != 0;
+    } else {
+        // Other formats: exact for everything but negative NaNs.
+        return x < T() || (x == T() && T(1) / x < T());
+    }
+}
+template <class T>
+constexpr T fabs(T x) noexcept { return signbit(x) ? -x : x; }
+template <class T>
+constexpr T copysign(T x, T s) noexcept { return signbit(s) ? -fabs(x) : fabs(x); }
+
+// Representation access for the formats with a known layout (O(1), so constant
+// evaluation stays far below the compilers' step limits).
+template <class T>
+inline constexpr int fmt_kind = (sizeof(T) == 4 && std::numeric_limits<T>::digits == 24) ? 1
+                              : (sizeof(T) == 8 && std::numeric_limits<T>::digits == 53) ? 2
+                              : (sizeof(T) == 16 && std::numeric_limits<T>::digits == 64 &&
+                                 std::endian::native == std::endian::little) ? 3
+                              : 0;
+struct x87_rep { std::uint64_t m; std::uint16_t se; std::uint16_t pad1; std::uint32_t pad2; };  // for writing
+struct x87_view { std::uint64_t m; std::uint16_t se; };  // for reading (the 6 padding bytes stay padding)
+
+// 2^e for any e from the smallest subnormal exponent to max_exponent - 1 (exact).
+template <class T>
+constexpr T pow2(int e) noexcept {
+    using L = std::numeric_limits<T>;
+    constexpr int dmin = L::min_exponent - L::digits;  // exponent of denorm_min
+    if constexpr (fmt_kind<T> == 1) {
+        return std::bit_cast<T>(e >= L::min_exponent - 1 ? static_cast<std::uint32_t>(e + 127) << 23
+                                                         : std::uint32_t(1) << (e - dmin));
+    } else if constexpr (fmt_kind<T> == 2) {
+        return std::bit_cast<T>(e >= L::min_exponent - 1 ? static_cast<std::uint64_t>(e + 1023) << 52
+                                                         : std::uint64_t(1) << (e - dmin));
+    } else if constexpr (fmt_kind<T> == 3) {
+        return e >= L::min_exponent - 1
+                   ? std::bit_cast<T>(x87_rep{std::uint64_t(1) << 63, static_cast<std::uint16_t>(e + 16383), 0, 0})
+                   : std::bit_cast<T>(x87_rep{std::uint64_t(1) << (e - dmin), 0, 0, 0});
+    } else {
+        if (e < L::min_exponent - 1) return pow2<T>(L::min_exponent - 1) * pow2<T>(e - (L::min_exponent - 1));
+        T r(1), b = e < 0 ? T(0.5) : T(2);
+        for (unsigned k = static_cast<unsigned>(e < 0 ? -e : e); k; k >>= 1) {
+            if (k & 1u) r *= b;
+            if (k > 1u) b *= b;  // (squaring past the last bit could overflow)
+        }
+        return r;
+    }
+}
+// Exponent of a finite nonzero x: x = m 2^e with 1 <= |m| < 2 (as std::ilogb).
+template <class T>
+constexpr int ilogb(T x) noexcept {
+    using L = std::numeric_limits<T>;
+    constexpr int dmin = L::min_exponent - L::digits;
+    if constexpr (fmt_kind<T> == 1 || fmt_kind<T> == 2) {
+        using U = std::conditional_t<fmt_kind<T> == 1, std::uint32_t, std::uint64_t>;
+        constexpr int mbits = L::digits - 1;
+        const U u = std::bit_cast<U>(x);
+        const int be = static_cast<int>((u >> mbits) & ((U(1) << (sizeof(U) * 8 - 1 - mbits)) - 1));
+        if (be) return be - (L::max_exponent - 1);
+        return std::bit_width(u & ((U(1) << mbits) - 1)) - 1 + dmin;  // subnormal
+    } else if constexpr (fmt_kind<T> == 3) {
+        const x87_view r = std::bit_cast<x87_view>(x);
+        const int be = r.se & 0x7fff;
+        if (be) return be - 16383;
+        return std::bit_width(r.m) - 1 + dmin;
+    } else {
+        T a = fabs(x);
+        int e = 0;
+        if (a < L::min()) { a *= pow2<T>(L::digits); e -= L::digits; }
+        for (int k = 1 << 14; k; k >>= 1)
+            if (k < L::max_exponent && a >= pow2<T>(k)) { a *= pow2<T>(-k); e += k; }
+        for (int k = 1 << 14; k; k >>= 1)
+            if (k <= -L::min_exponent && a < pow2<T>(1 - k)) { a *= pow2<T>(k); e -= k; }
+        while (a >= T(2)) { a /= T(2); ++e; }
+        while (a < T(1)) { a *= T(2); --e; }
+        return e;
+    }
+}
+template <class T>
+constexpr T logb(T x) noexcept {
+    if (isnan(x)) return x;
+    if (isinf(x)) return std::numeric_limits<T>::infinity();
+    if (x == T()) return -std::numeric_limits<T>::infinity();
+    return static_cast<T>(ilogb(x));
+}
+// x 2^n with a single rounding (as std::scalbn / std::ldexp in round-to-nearest).
+template <class T>
+constexpr T scalbn(T x, int n) noexcept {
+    using L = std::numeric_limits<T>;
+    if (x == T() || !isfinite(x) || n == 0) return x;
+    const int e = ilogb(x);
+    const int half = e / 2;
+    T m = x * pow2<T>(-half) * pow2<T>(half - e);  // exact: 1 <= |m| < 2
+    const long t = static_cast<long>(e) + n;           // target exponent
+    if (t > L::max_exponent - 1) return copysign(L::infinity(), x);
+    const int dmin = L::min_exponent - L::digits;      // exponent of denorm_min
+    if (t < dmin - 1) return copysign(T(), x);
+    if (t == dmin - 1) { m /= T(2); return m * pow2<T>(dmin); }
+    return m * pow2<T>(static_cast<int>(t));          // exact if normal, one rounding if not
+}
+template <class T>
+constexpr T ldexp(T x, int n) noexcept { return scalbn(x, n); }
+// x = m 2^e with 0.5 <= |m| < 1 (as std::frexp).
+template <class T>
+constexpr T frexp(T x, int* e) noexcept {
+    if (x == T() || !isfinite(x)) { *e = 0; return x; }
+    const int k = ilogb(x) + 1;
+    *e = k;
+    return scalbn(x, -k);
+}
+
+// Error-free transformations (exact in constant evaluation, which never contracts).
+template <class T>
+constexpr void two_sum(T a, T b, T& s, T& e) noexcept {
+    s = a + b;
+    const T bb = s - a;
+    e = (a - (s - bb)) + (b - bb);
+}
+template <class T>
+constexpr void two_prod(T a, T b, T& p, T& e) noexcept {
+    constexpr T split = pow2<T>((std::numeric_limits<T>::digits + 1) / 2) + T(1);
+    p = a * b;
+    const T ca = split * a, ah = ca - (ca - a), al = a - ah;
+    const T cb = split * b, bh = cb - (cb - b), bl = b - bh;
+    e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+}
+// Correctly rounded square root of m given as the exact sum hi + lo, 1 <= hi < 4.
+template <class T>
+constexpr T sqrt_scaled(T hi, T lo) noexcept {
+    // Newton from a crude start, then fix the last ulp with an exact midpoint test.
+    T r = hi < T(2) ? T(1.25) : T(1.75);
+    for (int i = 0; i < 8; ++i) r = (r + hi / r) / T(2);
+    const T ulp = pow2<T>(ilogb(r) - std::numeric_limits<T>::digits + 1);
+    for (int pass = 0; pass < 3; ++pass) {
+        // sign of m - (r + s ulp/2)^2 for s = +1 and -1, with every term exact.
+        const auto side = [&](T c) {  // sign of m - c^2 - c*ulp - ulp^2/4
+            T p, pe, s1, e1, s2, e2, s3, e3, s4, e4;
+            two_prod(c, c, p, pe);
+            two_sum(hi, -p, s1, e1);
+            two_sum(s1, lo - pe, s2, e2);
+            two_sum(s2, -c * ulp, s3, e3);
+            two_sum(s3, -(ulp * ulp) / T(4), s4, e4);
+            const T tail = ((e1 + e2) + e3) + e4;
+            const T v = s4 + tail;
+            return v > T() ? 1 : v < T() ? -1 : 0;
+        };
+        if (side(r) > 0) { r += ulp; continue; }            // m > (r + ulp/2)^2
+        if (side(r - ulp) < 0) { r -= ulp; continue; }      // m < (r - ulp/2)^2
+        break;
+    }
+    return r;
+}
+template <class T>
+constexpr T sqrt(T x) noexcept {
+    if (isnan(x) || x == T() || x == std::numeric_limits<T>::infinity()) return x;
+    if (x < T()) return std::numeric_limits<T>::quiet_NaN();
+    int e = ilogb(x);
+    if (e & 1) --e;  // even exponent: x = m 2^e, 1 <= m < 4
+    const T m = scalbn(x, -e);
+    return scalbn(sqrt_scaled(m, T()), e / 2);
+}
+// hypot(x, y) = sqrt(x^2 + y^2) without overflow or underflow, correctly rounded.
+template <class T>
+constexpr T hypot(T x, T y) noexcept {
+    if (isinf(x) || isinf(y)) return std::numeric_limits<T>::infinity();
+    if (isnan(x) || isnan(y)) return std::numeric_limits<T>::quiet_NaN();
+    x = fabs(x); y = fabs(y);
+    if (x < y) { const T t = x; x = y; y = t; }
+    if (x == T()) return T();
+    int e = ilogb(x);
+    if (e & 1) --e;
+    const T a = scalbn(x, -e), b = scalbn(y, -e);  // 1 <= a < 4; b may round if tiny
+    T p, pe, q, qe, s, se;
+    two_prod(a, a, p, pe);
+    two_prod(b, b, q, qe);
+    two_sum(p, q, s, se);
+    T lo = se + (pe + qe);
+    T hi = s;
+    two_sum(hi, lo, hi, lo);
+    // hi + lo in [1, 32): renormalize to [1, 4) by an exact even power of two.
+    int f = 0;
+    while (hi >= T(4)) { hi /= T(4); lo /= T(4); f += 1; }
+    return scalbn(sqrt_scaled(hi, lo), e + f);
+}
+}  // namespace cx
+
+// Wrappers: the constexpr helper in constant evaluation, the std:: call at run time.
+template <class T> constexpr bool c_isnan(T x) noexcept { if consteval { return cx::isnan(x); } else { return std::isnan(x); } }
+template <class T> constexpr bool c_isinf(T x) noexcept { if consteval { return cx::isinf(x); } else { return std::isinf(x); } }
+template <class T> constexpr bool c_isfinite(T x) noexcept { if consteval { return cx::isfinite(x); } else { return std::isfinite(x); } }
+template <class T> constexpr bool c_signbit(T x) noexcept { if consteval { return cx::signbit(x); } else { return std::signbit(x); } }
+template <class T> constexpr T c_fabs(T x) noexcept { if consteval { return cx::fabs(x); } else { return std::abs(x); } }
+template <class T> constexpr T c_copysign(T x, T s) noexcept { if consteval { return cx::copysign(x, s); } else { return std::copysign(x, s); } }
+template <class T> constexpr T c_logb(T x) noexcept { if consteval { return cx::logb(x); } else { return std::logb(x); } }
+template <class T> constexpr T c_scalbn(T x, int n) noexcept { if consteval { return cx::scalbn(x, n); } else { return std::scalbn(x, n); } }
+template <class T> constexpr T c_hypot(T x, T y) noexcept { if consteval { return cx::hypot(x, y); } else { return std::hypot(x, y); } }
+
 // ---- C99 Annex G (G.5.1) recovery of infinities in multiplication and division ----
 // Hamilton product r = p * q of raw components.
 template <class T>
@@ -53,31 +282,31 @@ constexpr void hamilton(const T* p, const T* q, T* r) noexcept {
     r[3] = p[0] * q[3] + p[1] * q[2] - p[2] * q[1] + p[3] * q[0];
 }
 template <class T>
-inline bool all_nan(const T* r) noexcept {
-    return std::isnan(r[0]) && std::isnan(r[1]) && std::isnan(r[2]) && std::isnan(r[3]);
+constexpr bool all_nan(const T* r) noexcept {
+    return c_isnan(r[0]) && c_isnan(r[1]) && c_isnan(r[2]) && c_isnan(r[3]);
 }
 template <class T>
-inline bool any_inf(const T* p) noexcept {
-    return std::isinf(p[0]) || std::isinf(p[1]) || std::isinf(p[2]) || std::isinf(p[3]);
+constexpr bool any_inf(const T* p) noexcept {
+    return c_isinf(p[0]) || c_isinf(p[1]) || c_isinf(p[2]) || c_isinf(p[3]);
 }
 template <class T>
-inline bool all_finite(const T* p) noexcept {
-    return std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]) && std::isfinite(p[3]);
+constexpr bool all_finite(const T* p) noexcept {
+    return c_isfinite(p[0]) && c_isfinite(p[1]) && c_isfinite(p[2]) && c_isfinite(p[3]);
 }
 // "Box" an infinite operand: infinite components become +-1, the others +-0.
 template <class T>
-inline void box(T* p) noexcept {
-    for (int i = 0; i < 4; ++i) p[i] = std::copysign(std::isinf(p[i]) ? T(1) : T(), p[i]);
+constexpr void box(T* p) noexcept {
+    for (int i = 0; i < 4; ++i) p[i] = c_copysign(c_isinf(p[i]) ? T(1) : T(), p[i]);
 }
 template <class T>
-inline void nan_to_zero(T* p) noexcept {
+constexpr void nan_to_zero(T* p) noexcept {
     for (int i = 0; i < 4; ++i)
-        if (std::isnan(p[i])) p[i] = std::copysign(T(), p[i]);
+        if (c_isnan(p[i])) p[i] = c_copysign(T(), p[i]);
 }
 // The _Cmultd recovery of C11 G.5.1, generalized to four components: applied when every
 // component of the naive product is NaN.
 template <class T>
-inline void mul_recover(T* p, T* q, T* r) noexcept {
+constexpr void mul_recover(T* p, T* q, T* r) noexcept {
     if (!all_nan(r)) return;
     bool recalc = false;
     if (any_inf(p)) {
@@ -94,7 +323,7 @@ inline void mul_recover(T* p, T* q, T* r) noexcept {
         // overflow of a partial product
         bool ovf = false;
         for (int i = 0; i < 4; ++i)
-            for (int j = 0; j < 4; ++j) ovf = ovf || std::isinf(p[i] * q[j]);
+            for (int j = 0; j < 4; ++j) ovf = ovf || c_isinf(p[i] * q[j]);
         if (ovf) {
             nan_to_zero(p);
             nan_to_zero(q);
@@ -109,25 +338,25 @@ inline void mul_recover(T* p, T* q, T* r) noexcept {
 // Division p / q = p conj(q) / |q|^2 with q scaled by a power of two (as _Cdivd), and the
 // _Cdivd recovery when every component of the result is NaN.
 template <class T>
-inline void div_annexg(T* p, T* q, T* r) noexcept {
-    const T m = std::max({std::abs(q[0]), std::abs(q[1]), std::abs(q[2]), std::abs(q[3])});
-    const T logbw = std::logb(m);
+constexpr void div_annexg(T* p, T* q, T* r) noexcept {
+    const T m = std::max({c_fabs(q[0]), c_fabs(q[1]), c_fabs(q[2]), c_fabs(q[3])});
+    const T logbw = c_logb(m);
     int k = 0;
     T qs[4] = {q[0], q[1], q[2], q[3]};
-    if (std::isfinite(logbw)) {
+    if (c_isfinite(logbw)) {
         k = static_cast<int>(logbw);
-        for (int i = 0; i < 4; ++i) qs[i] = std::scalbn(q[i], -k);
+        for (int i = 0; i < 4; ++i) qs[i] = c_scalbn(q[i], -k);
     }
     const T denom = qs[0] * qs[0] + qs[1] * qs[1] + qs[2] * qs[2] + qs[3] * qs[3];
     const T cq[4] = {qs[0], -qs[1], -qs[2], -qs[3]};
     T h[4];
     hamilton(p, cq, h);
-    for (int i = 0; i < 4; ++i) r[i] = std::scalbn(h[i] / denom, -k);
+    for (int i = 0; i < 4; ++i) r[i] = c_scalbn(h[i] / denom, -k);
     if (!all_nan(r)) return;
     const T inf = std::numeric_limits<T>::infinity();
-    const bool p_nan = std::isnan(p[0]) && std::isnan(p[1]) && std::isnan(p[2]) && std::isnan(p[3]);
+    const bool p_nan = c_isnan(p[0]) && c_isnan(p[1]) && c_isnan(p[2]) && c_isnan(p[3]);
     if (denom == T() && !p_nan) {
-        for (int i = 0; i < 4; ++i) r[i] = std::copysign(inf, q[0]) * p[i];
+        for (int i = 0; i < 4; ++i) r[i] = c_copysign(inf, q[0]) * p[i];
     } else if (any_inf(p) && all_finite(q)) {
         box(p);
         const T c2[4] = {q[0], -q[1], -q[2], -q[3]};
@@ -271,15 +500,12 @@ public:
     template <std::floating_point U>
     constexpr quaternion& operator/=(const quaternion<U>& q) noexcept {
         const quaternion r(q);
-        if consteval {
-            const T n = r.a_ * r.a_ + r.b_ * r.b_ + r.c_ * r.c_ + r.d_ * r.d_;
-            *this *= quaternion(r.a_ / n, -r.b_ / n, -r.c_ / n, -r.d_ / n);
-        } else {
-            // p conj(q) / |q|^2 with q scaled by a power of two; Annex G recovery.
-            T p[4] = {a_, b_, c_, d_}, d[4] = {r.a_, r.b_, r.c_, r.d_}, o[4];
-            detail::div_annexg(p, d, o);
-            a_ = o[0]; b_ = o[1]; c_ = o[2]; d_ = o[3];
-        }
+        // p conj(q) / |q|^2 with q scaled by a power of two; Annex G recovery.  The same
+        // steps run in constant evaluation (with the detail::cx helpers), so a constexpr
+        // quotient equals the runtime one wherever the runtime code is not contracted.
+        T p[4] = {a_, b_, c_, d_}, d[4] = {r.a_, r.b_, r.c_, r.d_}, o[4];
+        detail::div_annexg(p, d, o);
+        a_ = o[0]; b_ = o[1]; c_ = o[2]; d_ = o[3];
         return *this;
     }
 
@@ -523,8 +749,10 @@ template <class T>
 
 /// Magnitude, computed without undue overflow/underflow.
 template <class T>
-[[nodiscard]] inline T abs(const quaternion<T>& q) noexcept {
-    return std::hypot(std::hypot(q.w(), q.x()), std::hypot(q.y(), q.z()));
+[[nodiscard]] constexpr T abs(const quaternion<T>& q) noexcept {
+    // Run time: std::hypot.  Constant evaluation: a correctly rounded constexpr hypot.
+    using detail::c_hypot;
+    return c_hypot(c_hypot(q.w(), q.x()), c_hypot(q.y(), q.z()));
 }
 /// Angle in [0, pi] between q and the positive real axis: atan2(|v|, a).
 template <class T>
@@ -533,16 +761,17 @@ template <class T>
 }
 /// Unit quaternion q/|q| (q itself if zero).
 template <class T>
-[[nodiscard]] inline quaternion<T> normalize(const quaternion<T>& q) noexcept {
+[[nodiscard]] constexpr quaternion<T> normalize(const quaternion<T>& q) noexcept {
     const T r = abs(q);
     return r == T() ? q : q / r;
 }
 /// Projection onto the Riemann-sphere analogue (as std::proj).
 template <class T>
-[[nodiscard]] inline quaternion<T> proj(const quaternion<T>& q) noexcept {
-    if (std::isinf(q.w()) || std::isinf(q.x()) || std::isinf(q.y()) || std::isinf(q.z()))
-        return {std::numeric_limits<T>::infinity(), std::copysign(T(), q.x()),
-                std::copysign(T(), q.y()), std::copysign(T(), q.z())};
+[[nodiscard]] constexpr quaternion<T> proj(const quaternion<T>& q) noexcept {
+    using detail::c_isinf, detail::c_copysign;
+    if (c_isinf(q.w()) || c_isinf(q.x()) || c_isinf(q.y()) || c_isinf(q.z()))
+        return {std::numeric_limits<T>::infinity(), c_copysign(T(), q.x()),
+                c_copysign(T(), q.y()), c_copysign(T(), q.z())};
     return q;
 }
 

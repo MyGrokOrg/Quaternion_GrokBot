@@ -78,7 +78,7 @@ All members are `constexpr` and `noexcept`. Accessors are `[[nodiscard]]`.
 ### Non-member operators
 
 * `+ - * /` for every combination of quaternion, `T` and `std::complex<T>` (they are hidden friends, so `q * 2` works).
-* `p / q` is `p·conj(q)/‖q‖²` with `q` first scaled by a power of two (as C's `_Cdivd`), so it does not overflow or underflow for large or tiny `q`. In a constant expression it is `p * inverse(q)`. `s / q` is `s * inverse(q)`.
+* `p / q` is `p·conj(q)/‖q‖²` with `q` first scaled by a power of two (as C's `_Cdivd`), so it does not overflow or underflow for large or tiny `q`. A constant expression uses the same steps, so it gives the same bits as the runtime code wherever that code is not contracted into FMAs (see [constexpr](#constexpr)). `s / q` and `z / q` go through the same division.
 * `*` and `/` recover infinities as C11 Annex G (G.5.1) does; see [Infinities, NaNs and signed zeros](#infinities-nans-and-signed-zeros-c-annex-g).
 * `==`, and `!=` through C++20 rewriting, against quaternion, `T` and `std::complex<T>` in either order.
 * **Mixed precision.** For a floating-point type `U` other than `T`, `quaternion<T> op U`, `U op quaternion<T>`, `quaternion<T> op std::complex<U>` and `std::complex<U> op quaternion<T>` (`op` is `+ - * /`) return `quaternion<std::common_type_t<T, U>>`. The arithmetic is done in that type, so `quaternion<float>(1) * 0.1` is a `quaternion<double>` holding `0.1`, not `0.1f`. `==` against `U` or `std::complex<U>` also compares in the common type, so `quaternion<float>(0.1f) == 0.1` is false. `quaternion<T> op quaternion<U>` gives the wider type through the implicit widening constructor.
@@ -92,11 +92,11 @@ All members are `constexpr` and `noexcept`. Accessors are `[[nodiscard]]`.
 | Function | Result |
 |---|---|
 | `real(q)`, `unreal(q)` | Scalar part, and the vector part as a pure quaternion. |
-| `abs(q)` | `‖q‖`, computed with `hypot` so it doesn't overflow. |
+| `abs(q)` | `‖q‖`, computed with `hypot` so it doesn't overflow (`constexpr`; see [constexpr](#constexpr)). |
 | `arg(q)` | `atan2(‖v‖, a)` ∈ [0, π]: the angle from the positive real axis. |
 | `norm(q)` | `a²+b²+c²+d²` (`constexpr`; squared magnitude, as in `std::norm`). |
 | `conj(q)` | `(a, −b, −c, −d)` (`constexpr`). |
-| `proj(q)` | `q`, or `(+∞, ±0, ±0, ±0)` if any component is infinite (as `std::proj`). |
+| `proj(q)` | `q`, or `(+∞, ±0, ±0, ±0)` if any component is infinite (as `std::proj`; `constexpr`). |
 | `polar(rho, theta = 0)` | `rho(cos θ + i sin θ)`, identical to `std::polar` embedded on the i axis. |
 | `polar(rho, theta, axis)` | `rho(cos θ + u sin θ)` with `u` = the unit vector part of `axis`. This inverts `abs`/`arg`: `polar(abs(q), arg(q), q) == q`. |
 | `inverse(q)` | `conj(q)/norm(q)` (`constexpr`). |
@@ -321,10 +321,54 @@ Q v = r * 1.0_i * conj(r);                              // ≈ (0,0,1,0)
 * The standard forbids adding overloads to namespace `std`, so `std::get<I>(q)` written fully qualified does not compile. Use `quat::get`, ADL, or structured bindings.
 * The special functions lift a complex kernel in one argument. Every other parameter (an order, a degree, the modulus `k`, the Hurwitz `a`, the incomplete gamma/beta `a` and `b`) must be real.
 * **libc++ and `long double`.** libc++ 18/19 gives only double-precision `std::numbers` constants for `long double`, and it divides `complex<long double>` values in double precision. Its `long double` complex `asin`, `acos`, `asinh` and `acosh` are good to only about 1e-16, and they overflow for huge arguments. This library therefore carries its own constants, its own complex division (Smith's algorithm), and its own inverse trigonometric and hyperbolic kernels. All of them are a few ulp on every library.
-* The transcendental functions are not `constexpr`, because `<cmath>` is not `constexpr` until C++26. All arithmetic, `norm`, `conj`, `inverse`, `dot`, `cross` and integer `pow` are `constexpr`.
+* The transcendental functions are not `constexpr`; see [constexpr](#constexpr).
 * Annex G special values cover the elementary functions and arithmetic, but not the other special functions (gamma, zeta, Bessel, …). With non-finite input these return whatever their kernels produce, usually NaN.
 * For large ‖v‖, `exp`, `sin`, `cos`, `sinh`, `cosh` and `tanh` inherit the conditioning of the rounded θ = ‖v‖: a relative error of ε·θ in `cos θ`/`sin θ`. These errors are unchanged by the Annex G work.
 * In a `std::format` spec, the width counts code points, not East Asian display widths. That only matters for a wide fill character or a locale with non-ASCII digits.
+
+## constexpr
+
+**What is `constexpr`, on every supported toolchain** (GCC 14, Clang 18 and 19, libstdc++ and libc++, C++23):
+* all arithmetic, including the Annex G division with its power-of-two scaling;
+* comparisons, `conj`, `norm`, `dot`, `cross` and `inverse`;
+* `abs`, `normalize` and `proj`;
+* integer `pow`;
+* construction, access, the tuple protocol and the literals.
+
+`tests/test_constexpr.cpp` checks these with `static_assert` on every CI toolchain.
+
+**How it works.** `<cmath>` is not usable in constant expressions on Clang or libc++, so these functions call small helpers in `quat::detail::cx` during constant evaluation: `isnan`, `isinf`, `isfinite`, `signbit`, `fabs`, `copysign`, `logb`, `ilogb`, `scalbn`, `ldexp`, `frexp`, `sqrt` and `hypot`.
+* The helpers read and write the bits with `std::bit_cast` for float, double and x87 `long double`. Other formats fall back to slower exact arithmetic, and on such formats `signbit` cannot see the sign of a NaN.
+* `scalbn`, `logb`, `frexp` and `sqrt` give the same bits as glibc. The test sweeps 200,000 inputs per type, including subnormals.
+* `sqrt` and `hypot` are correctly rounded.
+* At run time, every function calls the same `std::` routine as before (`if consteval`), so runtime results and code are unchanged.
+
+**Runtime results are bit-identical to before.**
+* `tests/test_bitident.cpp` hashes the results of these operations for 1,600 input pairs per type and compares them with hashes taken from the previous header (commit 91cad1a). The inputs include special values, subnormals and values near overflow.
+* The CI job *bit-identity (haswell)* builds with `-march=haswell`, where the compilers contract multiply-adds into FMAs. It compiles the same corpus against the old and the new header with GCC 14 and Clang 18 at `-O2` and `-O3`, compares the raw bits, and runs the test suites.
+* No `-ffp-contract=off` or pragma was added to library code, so runtime speed is unchanged. Benchmarks are in the CHANGELOG.
+
+**Where constant evaluation and run time can differ**
+* **FMA builds.** In builds with FMA (e.g. `-march=haswell`, `-march=native`), the compiler may fuse the runtime Hamilton product and the division's sums into FMAs; constant evaluation never does. A constexpr product or quotient can then differ from the runtime one in the last bits. Without FMA they are identical; the test checks 256 quotients per type.
+* **`abs`.** At run time `abs` uses the C library's `hypot`, which glibc does not round correctly in every case; the constexpr `hypot` is correctly rounded. It differs from glibc in about 0.4% of inputs (by 1 ulp each, and in all 300 differences checked against mpmath ours was the closer), so a constexpr `abs` can differ from the runtime one by an ulp.
+* **Special values.** An operation that would produce a NaN (e.g. `0 * inf` inside a product with an infinite component) is not a constant expression. On GCC, neither is an overflow to infinity. Annex G special-value results are therefore only available at run time.
+
+**Feasibility study: the transcendental functions** (October 2026, measured on this project's toolchains)
+* **GCC 14.** With libstdc++, GCC evaluates nearly all of `<cmath>` at compile time, in C++23 and C++26 alike, for all three types. This is a GCC extension that uses MPFR. It covers sqrt, exp, log, pow, the trigonometric and hyperbolic functions and their inverses, fma, hypot, frexp, ldexp, cbrt, expm1, log1p, erf and tgamma. It does not cover nearbyint, rint or lgamma.
+* **Clang 18/19.** With libstdc++, only `abs` and the classification functions are constexpr; with libc++, only `isnan`, `isinf` and `isfinite`. Clang's constexpr builtins cover only `fabs`, `copysign`, `fmax`/`fmin` and classification.
+* **Standard.** P0533 (C++23) covers only the simple functions, and libc++ 18/19 does not implement it. P1383R2 (C++26, adopted June 2023) adds the transcendental functions. As of October 2026 it is still open in libc++ (llvm #105385) and in libstdc++ (PR 110353).
+* **Special values never fold, even on GCC.** `log(0)`, `sqrt(-1)`, `exp(±1000)`, `sin(inf)`, `sin(NaN)`, `atanh(1)` and an overflowing `fma` are all rejected as constant expressions.
+* **Compile time and run time disagree.** GCC rounds its compile-time results correctly; glibc does not. Over 800 inputs for each of 21 functions:
+  * double: **1,118 of 16,800** results differ;
+  * long double: **1,604 of 16,800** differ.
+* **Contraction.** With the same library code evaluated both ways, `-march=haswell` builds differed in **2,047 of 4,000** double results, because the runtime code was contracted into FMAs. With `-ffp-contract=off` the count was **0**.
+* **Cost.** Portable constexpr exp, log, the trigonometric and hyperbolic functions and their inverses, and pow, within 1 ulp for float, double and x87 `long double` (including Payne–Hanek argument reduction), would take an estimated **1,500–2,500 lines** of kernels plus mpmath tests.
+
+**Plan**
+* **Step 1 (done):** everything above that needs no transcendental function.
+* **Step 2 (not planned):** in-library constexpr transcendentals, which are too costly for what they gain.
+* **Step 3:** once libstdc++ and libc++ ship P1383 (detected through `__cpp_lib_constexpr_cmath`), mark the elementary functions `constexpr` and call `std::` from them. Results may then differ by an ulp between compile time and run time, as GCC's folding already does today; this will be documented.
+* **Step 4:** formatting stays a runtime operation. `format()` writes through `vformat_to`. Parsing of format specs is already constexpr, so an invalid literal format string is a compile error.
 
 ## Example
 
