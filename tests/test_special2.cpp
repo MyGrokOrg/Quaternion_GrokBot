@@ -1416,4 +1416,14 @@ template <class T> void fuzz_regression() {
 
 TEST(fuzz_regressions_zeta_polylog_lambert) { FOR_EACH_TYPE(fuzz_regression); }
 
+// Y_nu near overflow (nu = 75, |z| ~ 4e-3): H1_{nu+1} overflowed and Y came out NaN.
+TEST(neumann_near_overflow) {
+    const double nu = 0x1.2c0419c2354c8p+6;
+    const quaternion<double> q(-0x1.73a356d9f9bfap-14, 0x1.22a973e8f3d2dp-8, 0, 0);
+    const auto y = quat::cyl_neumann(nu, q);
+    // mpmath: -1.2365340526357777388e+306 - 8.2071771255193703861e+304 i
+    CHECK(std::abs(y.w() / -1.2365340526357777388e+306 - 1) < 1e-12);
+    CHECK(std::abs(y.x() / -8.2071771255193703861e+304 - 1) < 1e-12);
+}
+
 TEST_MAIN

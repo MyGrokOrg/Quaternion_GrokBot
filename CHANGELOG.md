@@ -15,6 +15,7 @@ Accuracy figures are worst-case errors against mpmath on random exact inputs (30
   * Before: `quaternion<float> * 1.0` narrowed `1.0` to `float` silently. It is now a `quaternion<double>`.
   * Integers still convert to `T`.
   * `std::complex` has no mixed operators at all. The promotion follows the floating-point rule of [cmplx.over] (which applies to `pow` and friends). README explains the choice.
+* **Fix (found by the manual fuzz run for this change, seed 2871196519):** `cyl_neumann`/`cyl_hankel_1` at large order and tiny |z| returned NaN when H⁽¹⁾_{ν+1} overflowed but the result did not. Example: ν ≈ 75, |z| ≈ 4.4e-3, Y ≈ −1.24e306. J, which is then below the smallest normal number, is now returned as 0, and Y/H⁽¹⁾ are now exact to < 1e-12 (before: NaN). Test `neumann_near_overflow`.
 * **Tests:**
   * `std_format`: 23 new checks across 3 types, including error cases.
   * `mixed_precision`: result types via `static_assert`, values, complex on either side, equality, and `constexpr` use.

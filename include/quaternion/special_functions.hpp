@@ -1318,6 +1318,10 @@ template <class T>
         const cplx<T> h2 = cplx<T>(T(), T(2) / pi<T>) * expi_pi(mu / T(2)) * k2;
         return {(h0 + h2) / T(2), h0};
     }
+    // Near overflow (large mu, tiny z) H1_{mu+1} can overflow while H1_mu does not; then
+    // |J_mu| ~ 2/(pi |z H1_{mu+1}|) is below the smallest normal and is returned as 0
+    // (instead of NaN from inf - inf).
+    if (is_finite(h0) && !is_finite(h1)) return {cplx<T>(), h0};
     const cplx<T> rho = bessel_ratio(mu, z, T(-1));
     const cplx<T> j = cdiv(cplx<T>(T(), T(2) / pi<T>), z * (rho * h0 - h1));
     return {j, h0};
