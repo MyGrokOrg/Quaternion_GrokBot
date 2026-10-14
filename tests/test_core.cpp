@@ -1,5 +1,6 @@
 #include "test_framework.hpp"
 #include <tuple>
+#include <string>
 using quat::quaternion;
 
 // ---- compile-time checks ----
@@ -153,5 +154,59 @@ template <class T> void literals() {
     static_assert(1_i * 1_i == -1.0);
 }
 TEST(literals) { literals<double>(); }
+
+// Mixed precision: floating-point U != T promotes to common_type_t<T, U>; integers keep T.
+template <class A, class B>
+concept can_mul = requires(A a, B b) { a * b; };
+TEST(mixed_precision) {
+    using qf = quaternion<float>; using qd = quaternion<double>; using ql = quaternion<long double>;
+    const qf f(1, 2, 3, 4);
+    const qd d(0.5, 0, 0, 0.25);
+    static_assert(std::is_same_v<decltype(f * 1.0), qd>);
+    static_assert(std::is_same_v<decltype(1.0 + f), qd>);
+    static_assert(std::is_same_v<decltype(f / 2.0L), ql>);
+    static_assert(std::is_same_v<decltype(d - 1.0f), qd>);
+    static_assert(std::is_same_v<decltype(1.0f / d), qd>);
+    static_assert(std::is_same_v<decltype(f * 2), qf>);      // integer: converts to T
+    static_assert(std::is_same_v<decltype(2 * d), qd>);
+    static_assert(std::is_same_v<decltype(f * 1.0f), qf>);
+    static_assert(std::is_same_v<decltype(f * d), qd>);       // quaternion<U> (already)
+    static_assert(std::is_same_v<decltype(f * std::complex<double>(1, 2)), qd>);
+    static_assert(std::is_same_v<decltype(std::complex<long double>(1, 2) - d), ql>);
+    static_assert(std::is_same_v<decltype(d + std::complex<float>(1, 2)), qd>);
+    static_assert(can_mul<qf, double> && can_mul<long double, qd> && can_mul<qf, std::complex<double>>);
+    static_assert(!can_mul<qd, std::string>);
+    // Values: computed in the common type, no narrowing to float.
+    const double third = 1.0 / 3.0;
+    const qd r = f * third;
+    CHECK(r == qd(third, 2 * third, 3 * third, 4 * third));
+    CHECK(r.w() != static_cast<double>(static_cast<float>(third)));
+    CHECK((third + f) == qd(1 + third, 2, 3, 4));
+    CHECK((f - third) == qd(1 - third, 2, 3, 4));
+    CHECK((third - f) == qd(third - 1, -2, -3, -4));
+    CHECK((1.0 / qf(2, 0, 0, 0)) == qd(0.5, 0, 0, 0));
+    CHECK((qf(2, 0, 0, 0) / 4.0L) == ql(0.5L, 0, 0, 0));
+    const std::complex<double> z(third, 1);
+    CHECK((f * z) == qd(f) * z);
+    CHECK((z * f) == z * qd(f));
+    CHECK((z / f) == z / qd(f));
+    CHECK((f + z) == qd(1 + third, 3, 3, 4));
+    // Non-commutativity is kept: complex on the left and right differ.
+    CHECK((z * f) != (f * z));
+    // Mixed equality compares in the common type.
+    CHECK(qf(0.5f) == 0.5);
+    CHECK(!(qf(0.1f) == 0.1));        // 0.1f != 0.1 once promoted
+    CHECK(qf(0.1f) == 0.1f);
+    CHECK(0.5L == qd(0.5));
+    CHECK(qf(1, 2, 0, 0) == std::complex<double>(1, 2));
+    CHECK(qf(1, 2, 0, 0) != std::complex<double>(1, 2.5));
+    // Compound assignment keeps the left type (as std::complex<T>::operator*=(const T&)).
+    qf g(1, 2, 3, 4);
+    g *= 2;
+    static_assert(std::is_same_v<decltype(g *= 0.5f), qf&>);
+    CHECK(g == qf(2, 4, 6, 8));
+    constexpr auto c = quaternion<float>(1, 0, 0, 0) * 2.0;
+    static_assert(c == quaternion<double>(2, 0, 0, 0));
+}
 
 TEST_MAIN

@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <format>
 #include <istream>
+#include <iterator>
 #include <limits>
 #include <ostream>
 #include <sstream>
@@ -312,6 +313,46 @@ public:
     QUAT_BINOP(/)
 #undef QUAT_BINOP
 
+    // ---- mixed precision: a floating-point scalar or complex of another type U.
+    // The result is quaternion<common_type_t<T, U>>, the floating-point promotion that
+    // [cmplx.over] uses (so quaternion<float> * 1.0 is a quaternion<double>, not a narrowed
+    // quaternion<float>).  Integers keep converting to T through the operators above.
+    // (std::complex itself has no mixed operators: complex<float>{} * 1.0 does not compile.)
+#define QUAT_MIXOP(OP)                                                                       \
+    template <std::floating_point U>                                                         \
+        requires(!std::same_as<U, T>)                                                        \
+    [[nodiscard]] friend constexpr quaternion<std::common_type_t<T, U>> operator OP(         \
+        const quaternion& l, const U& r) noexcept {                                          \
+        using R = std::common_type_t<T, U>;                                                  \
+        return quaternion<R>(l) OP static_cast<R>(r);                                        \
+    }                                                                                        \
+    template <std::floating_point U>                                                         \
+        requires(!std::same_as<U, T>)                                                        \
+    [[nodiscard]] friend constexpr quaternion<std::common_type_t<T, U>> operator OP(         \
+        const U& l, const quaternion& r) noexcept {                                          \
+        using R = std::common_type_t<T, U>;                                                  \
+        return static_cast<R>(l) OP quaternion<R>(r);                                        \
+    }                                                                                        \
+    template <std::floating_point U>                                                         \
+        requires(!std::same_as<U, T>)                                                        \
+    [[nodiscard]] friend constexpr quaternion<std::common_type_t<T, U>> operator OP(         \
+        const quaternion& l, const std::complex<U>& r) noexcept {                            \
+        using R = std::common_type_t<T, U>;                                                  \
+        return quaternion<R>(l) OP std::complex<R>(static_cast<R>(r.real()), static_cast<R>(r.imag())); \
+    }                                                                                        \
+    template <std::floating_point U>                                                         \
+        requires(!std::same_as<U, T>)                                                        \
+    [[nodiscard]] friend constexpr quaternion<std::common_type_t<T, U>> operator OP(         \
+        const std::complex<U>& l, const quaternion& r) noexcept {                            \
+        using R = std::common_type_t<T, U>;                                                  \
+        return std::complex<R>(static_cast<R>(l.real()), static_cast<R>(l.imag())) OP quaternion<R>(r); \
+    }
+    QUAT_MIXOP(+)
+    QUAT_MIXOP(-)
+    QUAT_MIXOP(*)
+    QUAT_MIXOP(/)
+#undef QUAT_MIXOP
+
     // ---- comparison (C++20 rewrites give !=, and reversed operands) ---------
     [[nodiscard]] friend constexpr bool operator==(const quaternion& l, const quaternion& r) noexcept {
         return l.a_ == r.a_ && l.b_ == r.b_ && l.c_ == r.c_ && l.d_ == r.d_;
@@ -321,6 +362,18 @@ public:
     }
     [[nodiscard]] friend constexpr bool operator==(const quaternion& l, const std::complex<T>& r) noexcept {
         return l.a_ == r.real() && l.b_ == r.imag() && l.c_ == T() && l.d_ == T();
+    }
+    template <std::floating_point U>
+        requires(!std::same_as<U, T>)
+    [[nodiscard]] friend constexpr bool operator==(const quaternion& l, const U& r) noexcept {
+        using R = std::common_type_t<T, U>;
+        return quaternion<R>(l) == static_cast<R>(r);
+    }
+    template <std::floating_point U>
+        requires(!std::same_as<U, T>)
+    [[nodiscard]] friend constexpr bool operator==(const quaternion& l, const std::complex<U>& r) noexcept {
+        using R = std::common_type_t<T, U>;
+        return quaternion<R>(l) == std::complex<R>(static_cast<R>(r.real()), static_cast<R>(r.imag()));
     }
 
 private:
@@ -884,21 +937,170 @@ struct std::tuple_element<I, quat::quaternion<T>> {
 };
 
 // ---- std::format support --------------------------------------------------------
-// The format spec is that of T and is applied to each component:
-//   std::format("{:.2f}", q)  ->  "(1.00,2.00,3.00,4.00)"
+// Spec grammar (the std-format-spec of floating-point types, split in two):
+//   [[fill]align][sign]['#'][width][.precision]['L'][type]
+// * fill, align and width apply to the whole "(a,b,c,d)" text; the default alignment is
+//   right, as for numbers.  width and precision may be nested replacement fields ({} or {n}).
+// * sign, '#', precision, 'L' and type (a A e E f F g G) apply to every component.
+// * The '0' flag is rejected (format_error): zero padding of the whole text is meaningless.
+//   std::format("{:*^30.2f}", q)  ->  "****(1.00,2.00,3.00,4.00)*****"
 template <class T, class CharT>
-struct std::formatter<quat::quaternion<T>, CharT> : std::formatter<T, CharT> {
+struct std::formatter<quat::quaternion<T>, CharT> {
+private:
+    CharT fill_[4] = {CharT(' ')};
+    int fill_len_ = 1;
+    char align_ = 0;  // 0, '<', '>', '^'
+    char sign_ = 0;   // 0, '+', '-', ' '
+    bool alt_ = false, loc_ = false;
+    int width_ = -1, width_arg_ = -1, prec_ = -1, prec_arg_ = -1;
+    char type_ = 0;
+
+    static constexpr bool is_align(CharT c) { return c == CharT('<') || c == CharT('>') || c == CharT('^'); }
+    static constexpr int unit_len(const CharT* p, const CharT* e) {
+        if constexpr (sizeof(CharT) == 1) {
+            const unsigned char u = static_cast<unsigned char>(*p);
+            const int n = u < 0x80 ? 1 : u >= 0xF0 ? 4 : u >= 0xE0 ? 3 : u >= 0xC0 ? 2 : 1;
+            return n <= e - p ? n : 1;
+        } else if constexpr (sizeof(CharT) == 2) {
+            const auto u = static_cast<unsigned>(*p);
+            return (u >= 0xD800 && u < 0xDC00 && e - p >= 2) ? 2 : 1;
+        } else {
+            return 1;
+        }
+    }
+    template <class It>
+    static constexpr It parse_int_or_arg(It it, It end, std::basic_format_parse_context<CharT>& ctx,
+                                         int& value, int& arg) {
+        if (*it == CharT('{')) {
+            ++it;
+            if (it == end) throw std::format_error("quaternion format: unterminated nested field");
+            if (*it == CharT('}')) {
+                arg = static_cast<int>(ctx.next_arg_id());
+            } else {
+                int n = 0;
+                if (*it < CharT('0') || *it > CharT('9')) throw std::format_error("quaternion format: bad nested field");
+                while (it != end && *it >= CharT('0') && *it <= CharT('9')) n = n * 10 + static_cast<int>(*it++ - CharT('0'));
+                if (it == end || *it != CharT('}')) throw std::format_error("quaternion format: bad nested field");
+                ctx.check_arg_id(static_cast<std::size_t>(n));
+                arg = n;
+            }
+            return ++it;
+        }
+        int n = 0;
+        while (it != end && *it >= CharT('0') && *it <= CharT('9')) {
+            n = n * 10 + static_cast<int>(*it++ - CharT('0'));
+            if (n > 1000000) throw std::format_error("quaternion format: number too large");
+        }
+        value = n;
+        return it;
+    }
+    template <class Ctx>
+    static int arg_value(Ctx& ctx, int id) {
+        const auto a = ctx.arg(static_cast<std::size_t>(id));
+        long long v = -1;
+        std::visit_format_arg(
+            [&v](auto x) {
+                if constexpr (std::is_integral_v<decltype(x)> && !std::is_same_v<decltype(x), bool> &&
+                              !std::is_same_v<decltype(x), CharT>)
+                    v = (x < 0 || static_cast<unsigned long long>(x) > 1000000ULL) ? -1 : static_cast<long long>(x);
+            },
+            a);
+        if (v < 0) throw std::format_error("quaternion format: width/precision argument must be a small non-negative integer");
+        return static_cast<int>(v);
+    }
+
+public:
+    constexpr auto parse(std::basic_format_parse_context<CharT>& ctx) {
+        auto it = ctx.begin();
+        const auto end = ctx.end();
+        if (it == end || *it == CharT('}')) return it;
+        // [[fill]align]
+        const int ul = unit_len(&*it, &*it + (end - it));
+        if (end - it > ul && is_align(it[ul])) {
+            if (*it == CharT('{') || *it == CharT('}')) throw std::format_error("quaternion format: invalid fill");
+            fill_len_ = ul;
+            for (int n = 0; n < ul; ++n) fill_[n] = it[n];
+            it += ul;
+            align_ = static_cast<char>(*it++);
+        } else if (is_align(*it)) {
+            align_ = static_cast<char>(*it++);
+        }
+        if (it != end && (*it == CharT('+') || *it == CharT('-') || *it == CharT(' '))) sign_ = static_cast<char>(*it++);
+        if (it != end && *it == CharT('#')) { alt_ = true; ++it; }
+        if (it != end && *it == CharT('0'))
+            throw std::format_error("quaternion format: the '0' flag is not supported; use a fill character");
+        if (it != end && ((*it >= CharT('1') && *it <= CharT('9')) || *it == CharT('{')))
+            it = parse_int_or_arg(it, end, ctx, width_, width_arg_);
+        if (it != end && *it == CharT('.')) {
+            ++it;
+            if (it == end || !((*it >= CharT('0') && *it <= CharT('9')) || *it == CharT('{')))
+                throw std::format_error("quaternion format: missing precision");
+            it = parse_int_or_arg(it, end, ctx, prec_, prec_arg_);
+        }
+        if (it != end && *it == CharT('L')) { loc_ = true; ++it; }
+        if (it != end && *it != CharT('}')) {
+            switch (static_cast<char>(*it)) {
+                case 'a': case 'A': case 'e': case 'E': case 'f': case 'F': case 'g': case 'G':
+                    type_ = static_cast<char>(*it++);
+                    break;
+                default:
+                    throw std::format_error("quaternion format: invalid type");
+            }
+        }
+        if (it != end && *it != CharT('}')) throw std::format_error("quaternion format: invalid spec");
+        return it;
+    }
+
     template <class FormatContext>
     auto format(const quat::quaternion<T>& q, FormatContext& ctx) const {
-        auto out = ctx.out();
-        const T c[4] = {q.w(), q.x(), q.y(), q.z()};
-        *out++ = CharT('(');
-        for (int n = 0; n < 4; ++n) {
-            if (n) *out++ = CharT(',');
-            ctx.advance_to(out);
-            out = std::formatter<T, CharT>::format(c[n], ctx);
+        const int width = width_arg_ >= 0 ? arg_value(ctx, width_arg_) : width_;
+        const int prec = prec_arg_ >= 0 ? arg_value(ctx, prec_arg_) : prec_;
+        // Per-component spec "{:[sign][#][.prec][L][type]}".
+        CharT spec[24];
+        int n = 0;
+        spec[n++] = CharT('{'); spec[n++] = CharT(':');
+        if (sign_) spec[n++] = CharT(sign_);
+        if (alt_) spec[n++] = CharT('#');
+        if (prec >= 0) {
+            spec[n++] = CharT('.');
+            char d[12];
+            int k = 0, p = prec;
+            do { d[k++] = static_cast<char>('0' + p % 10); p /= 10; } while (p);
+            while (k) spec[n++] = CharT(d[--k]);
         }
-        *out++ = CharT(')');
+        if (loc_) spec[n++] = CharT('L');
+        if (type_) spec[n++] = CharT(type_);
+        spec[n++] = CharT('}');
+        const std::basic_string_view<CharT> sv(spec, static_cast<std::size_t>(n));
+        std::basic_string<CharT> body;
+        body += CharT('(');
+        const T c[4] = {q.w(), q.x(), q.y(), q.z()};
+        for (int m = 0; m < 4; ++m) {
+            if (m) body += CharT(',');
+            const T v = c[m];
+            if constexpr (std::is_same_v<CharT, char>) {
+                if (loc_) std::vformat_to(std::back_inserter(body), ctx.locale(), sv, std::make_format_args(v));
+                else std::vformat_to(std::back_inserter(body), sv, std::make_format_args(v));
+            } else {
+                if (loc_) std::vformat_to(std::back_inserter(body), ctx.locale(), sv, std::make_wformat_args(v));
+                else std::vformat_to(std::back_inserter(body), sv, std::make_wformat_args(v));
+            }
+        }
+        body += CharT(')');
+        // Pad the whole text; its width counts code points (all components are ASCII
+        // unless a locale supplies other separators).
+        std::size_t len = 0;
+        for (std::size_t m = 0; m < body.size(); m += static_cast<std::size_t>(unit_len(body.data() + m, body.data() + body.size()))) ++len;
+        const std::size_t pad = width > 0 && static_cast<std::size_t>(width) > len ? static_cast<std::size_t>(width) - len : 0;
+        const std::size_t before = align_ == '<' ? 0 : align_ == '^' ? pad / 2 : pad;
+        auto out = ctx.out();
+        const auto put_fill = [&](std::size_t k) {
+            for (; k; --k)
+                for (int f = 0; f < fill_len_; ++f) *out++ = fill_[f];
+        };
+        put_fill(before);
+        for (const CharT ch : body) *out++ = ch;
+        put_fill(pad - before);
         return out;
     }
 };

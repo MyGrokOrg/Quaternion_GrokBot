@@ -2,6 +2,23 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## std::format width for the whole quaternion; mixed-precision operators
+
+* **Formatting (behavior change).**
+  * Fill, align and width now apply to the whole `(a,b,c,d)` text, not to each component. This matches `operator<<` and the P2197 proposal for `std::complex`. The default alignment is right.
+  * Sign, `#`, precision, `L` and type still apply to every component.
+  * Nested `{}`/`{n}` width and precision are supported, and so is a multi-byte fill.
+  * The `0` flag and non-floating types (`d`, `s`, `x`, …) are rejected with `std::format_error`.
+  * Before: `std::format("{:>4}", q)` gave `(   1,   2,   3,   4)`. It now gives `(1,2,3,4)`, because a width of 4 is narrower than the text. Use `{:>20}` to pad the whole quaternion.
+* **Mixed-precision operators.**
+  * `+ - * /` between `quaternion<T>` and a floating-point `U ≠ T` or `std::complex<U>`, in either order, return `quaternion<common_type_t<T, U>>`, computed in that type. `==` against those types also compares in the common type.
+  * Before: `quaternion<float> * 1.0` narrowed `1.0` to `float` silently. It is now a `quaternion<double>`.
+  * Integers still convert to `T`.
+  * `std::complex` has no mixed operators at all. The promotion follows the floating-point rule of [cmplx.over] (which applies to `pow` and friends). README explains the choice.
+* **Tests:**
+  * `std_format`: 23 new checks across 3 types, including error cases.
+  * `mixed_precision`: result types via `static_assert`, values, complex on either side, equality, and `constexpr` use.
+
 ## Nightly mpmath fuzz job; fixes for ζ near 0, Li_s near integer s, and W₀
 
 * **Fuzz job.** `.github/workflows/fuzz.yml` runs nightly (cron 06:17 UTC) and on `workflow_dispatch` (optional `seed`, `samples`). It is a separate, non-gating workflow, with GCC 14/libstdc++ and Clang 18/libc++.

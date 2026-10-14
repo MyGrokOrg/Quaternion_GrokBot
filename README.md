@@ -81,6 +81,9 @@ All members are `constexpr` and `noexcept`. Accessors are `[[nodiscard]]`.
 * `p / q` is `p·conj(q)/‖q‖²` with `q` first scaled by a power of two (as C's `_Cdivd`), so it does not overflow or underflow for large or tiny `q`. In a constant expression it is `p * inverse(q)`. `s / q` is `s * inverse(q)`.
 * `*` and `/` recover infinities as C11 Annex G (G.5.1) does; see [Infinities, NaNs and signed zeros](#infinities-nans-and-signed-zeros-c-annex-g).
 * `==`, and `!=` through C++20 rewriting, against quaternion, `T` and `std::complex<T>` in either order.
+* **Mixed precision.** For a floating-point type `U` other than `T`, `quaternion<T> op U`, `U op quaternion<T>`, `quaternion<T> op std::complex<U>` and `std::complex<U> op quaternion<T>` (`op` is `+ - * /`) return `quaternion<std::common_type_t<T, U>>`. The arithmetic is done in that type, so `quaternion<float>(1) * 0.1` is a `quaternion<double>` holding `0.1`, not `0.1f`. `==` against `U` or `std::complex<U>` also compares in the common type, so `quaternion<float>(0.1f) == 0.1` is false. `quaternion<T> op quaternion<U>` gives the wider type through the implicit widening constructor.
+  * *How this relates to `std::complex`.* `std::complex` has no mixed operators: its operators are templates on a single `T`, so `complex<float>{} * 1.0`, `complex<double>{} * 2` and `complex<float>{} * complex<double>{}` all fail to compile. [cmplx.over] covers only the non-member functions `arg`, `conj`, `imag`, `norm`, `polar`, `proj`, `real` and `pow`. For those it promotes a `double` or integer argument to `complex<double>` (and `long double` to `complex<long double>`), and `pow` uses `complex<common_type_t<T, U>>` with integers counted as `double`. Here the floating-point part of that rule is applied to the operators. Integers are the deliberate exception: they still convert to `T`, so `quaternion<float> * 2` stays `quaternion<float>`, as `q * 2` always has in this library. Promoting it to `double`, as `pow(complex<float>, int)` does, would silently double the storage of existing code.
+  * Compound assignment keeps the left-hand type, as `std::complex<T>::operator*=(const T&)` does (`qf *= 0.5` converts `0.5` to `float`).
 * `operator<<` prints `(a,b,c,d)`. It honors the stream's flags, precision and locale, and the width applies to the whole text, as with `std::complex`.
 * `operator>>` reads `a`, `(a)`, `(a,b)`, `(a,b,c)` or `(a,b,c,d)`. On malformed input it sets `failbit` and leaves the target unchanged.
 
@@ -288,7 +291,13 @@ Accuracy degrades in these cases:
 ### Tuple protocol, formatting and literals
 
 * `std::tuple_size<quaternion<T>>` is 4, and `std::tuple_element<I, quaternion<T>>` is `T`. `quat::get<I>(q)` is found by ADL, so structured bindings work, and so does `using std::get; get<0>(q);`.
-* `std::formatter<quaternion<T>, CharT>` takes the format spec of `T` and applies it to each component, so `std::format("{:.2f}", q)` gives `(1.00,2.00,3.00,4.00)`. Wide strings work too.
+* `std::formatter<quaternion<T>, CharT>` (`char` and `wchar_t`) takes the spec `[[fill]align][sign][#][width][.precision][L][type]`. It splits the spec as the P2197 proposal for formatting `std::complex` does:
+  * **Whole text:** fill, align and width apply to the whole `(a,b,c,d)`. The default alignment is right, as for numbers. The text is never truncated, and the fill may be any single code point.
+  * **Each component:** sign (`+`, `-`, space), `#`, precision, `L` and type (`a A e E f F g G`) apply to every component.
+  * Width and precision may be nested fields (`{}` or `{n}`); the argument must be a non-negative integer.
+  * The `0` flag and any other type throw `std::format_error` (a compile error with a literal format string).
+
+  For example, `std::format("{:*^30.2f}", q)` gives `****(1.00,2.00,3.00,4.00)*****`, and `std::format("{:>{}.{}e}", q, 60, 3)` right-aligns the whole quaternion in 60 columns.
 * The inline namespace `quat::literals` (and `quat::literals::quaternion_literals`) defines:
   * `_i`, `_j`, `_k` for `quaternion<double>`
   * `_if`, `_jf`, `_kf` for `float`
@@ -308,14 +317,14 @@ Q v = r * 1.0_i * conj(r);                              // ≈ (0,0,1,0)
 
 ## Notes and limitations
 
-* Mixed-precision binary operators such as `quaternion<float> * quaternion<double>` are not provided, which matches `std::complex`. Convert one operand explicitly. The compound assignments do accept other precisions.
+* Mixed-precision operators cover floating-point scalars, `std::complex<U>` and `quaternion<U>`. Integers convert to `T` (see [Non-member operators](#non-member-operators)). The transcendental and special functions have no mixed-precision overloads.
 * The standard forbids adding overloads to namespace `std`, so `std::get<I>(q)` written fully qualified does not compile. Use `quat::get`, ADL, or structured bindings.
 * The special functions lift a complex kernel in one argument. Every other parameter (an order, a degree, the modulus `k`, the Hurwitz `a`, the incomplete gamma/beta `a` and `b`) must be real.
 * **libc++ and `long double`.** libc++ 18/19 gives only double-precision `std::numbers` constants for `long double`, and it divides `complex<long double>` values in double precision. Its `long double` complex `asin`, `acos`, `asinh` and `acosh` are good to only about 1e-16, and they overflow for huge arguments. This library therefore carries its own constants, its own complex division (Smith's algorithm), and its own inverse trigonometric and hyperbolic kernels. All of them are a few ulp on every library.
 * The transcendental functions are not `constexpr`, because `<cmath>` is not `constexpr` until C++26. All arithmetic, `norm`, `conj`, `inverse`, `dot`, `cross` and integer `pow` are `constexpr`.
 * Annex G special values cover the elementary functions and arithmetic, but not the other special functions (gamma, zeta, Bessel, …). With non-finite input these return whatever their kernels produce, usually NaN.
 * For large ‖v‖, `exp`, `sin`, `cos`, `sinh`, `cosh` and `tanh` inherit the conditioning of the rounded θ = ‖v‖: a relative error of ε·θ in `cos θ`/`sin θ`. These errors are unchanged by the Annex G work.
-* In a `std::format` spec, the width applies to each component, not to the whole quaternion.
+* In a `std::format` spec, the width counts code points, not East Asian display widths. That only matters for a wide fill character or a locale with non-ASCII digits.
 
 ## Example
 
