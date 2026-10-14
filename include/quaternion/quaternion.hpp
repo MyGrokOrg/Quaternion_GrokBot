@@ -6,6 +6,7 @@
 #ifndef QUATERNION_QUATERNION_HPP
 #define QUATERNION_QUATERNION_HPP
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <concepts>
@@ -40,6 +41,104 @@ template <class T>
 inline constexpr T ln10_v = static_cast<T>(2.302585092994045684017991454684364208L);
 template <class T>
 inline constexpr T egamma_v = static_cast<T>(0.577215664901532860606512090082402431L);
+
+// ---- C99 Annex G (G.5.1) recovery of infinities in multiplication and division ----
+// Hamilton product r = p * q of raw components.
+template <class T>
+constexpr void hamilton(const T* p, const T* q, T* r) noexcept {
+    r[0] = p[0] * q[0] - p[1] * q[1] - p[2] * q[2] - p[3] * q[3];
+    r[1] = p[0] * q[1] + p[1] * q[0] + p[2] * q[3] - p[3] * q[2];
+    r[2] = p[0] * q[2] - p[1] * q[3] + p[2] * q[0] + p[3] * q[1];
+    r[3] = p[0] * q[3] + p[1] * q[2] - p[2] * q[1] + p[3] * q[0];
+}
+template <class T>
+inline bool all_nan(const T* r) noexcept {
+    return std::isnan(r[0]) && std::isnan(r[1]) && std::isnan(r[2]) && std::isnan(r[3]);
+}
+template <class T>
+inline bool any_inf(const T* p) noexcept {
+    return std::isinf(p[0]) || std::isinf(p[1]) || std::isinf(p[2]) || std::isinf(p[3]);
+}
+template <class T>
+inline bool all_finite(const T* p) noexcept {
+    return std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]) && std::isfinite(p[3]);
+}
+// "Box" an infinite operand: infinite components become +-1, the others +-0.
+template <class T>
+inline void box(T* p) noexcept {
+    for (int i = 0; i < 4; ++i) p[i] = std::copysign(std::isinf(p[i]) ? T(1) : T(), p[i]);
+}
+template <class T>
+inline void nan_to_zero(T* p) noexcept {
+    for (int i = 0; i < 4; ++i)
+        if (std::isnan(p[i])) p[i] = std::copysign(T(), p[i]);
+}
+// The _Cmultd recovery of C11 G.5.1, generalized to four components: applied when every
+// component of the naive product is NaN.
+template <class T>
+inline void mul_recover(T* p, T* q, T* r) noexcept {
+    if (!all_nan(r)) return;
+    bool recalc = false;
+    if (any_inf(p)) {
+        box(p);
+        nan_to_zero(q);
+        recalc = true;
+    }
+    if (any_inf(q)) {
+        box(q);
+        nan_to_zero(p);
+        recalc = true;
+    }
+    if (!recalc) {
+        // overflow of a partial product
+        bool ovf = false;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j) ovf = ovf || std::isinf(p[i] * q[j]);
+        if (ovf) {
+            nan_to_zero(p);
+            nan_to_zero(q);
+            recalc = true;
+        }
+    }
+    if (recalc) {
+        hamilton(p, q, r);
+        for (int i = 0; i < 4; ++i) r[i] *= std::numeric_limits<T>::infinity();
+    }
+}
+// Division p / q = p conj(q) / |q|^2 with q scaled by a power of two (as _Cdivd), and the
+// _Cdivd recovery when every component of the result is NaN.
+template <class T>
+inline void div_annexg(T* p, T* q, T* r) noexcept {
+    const T m = std::max({std::abs(q[0]), std::abs(q[1]), std::abs(q[2]), std::abs(q[3])});
+    const T logbw = std::logb(m);
+    int k = 0;
+    T qs[4] = {q[0], q[1], q[2], q[3]};
+    if (std::isfinite(logbw)) {
+        k = static_cast<int>(logbw);
+        for (int i = 0; i < 4; ++i) qs[i] = std::scalbn(q[i], -k);
+    }
+    const T denom = qs[0] * qs[0] + qs[1] * qs[1] + qs[2] * qs[2] + qs[3] * qs[3];
+    const T cq[4] = {qs[0], -qs[1], -qs[2], -qs[3]};
+    T h[4];
+    hamilton(p, cq, h);
+    for (int i = 0; i < 4; ++i) r[i] = std::scalbn(h[i] / denom, -k);
+    if (!all_nan(r)) return;
+    const T inf = std::numeric_limits<T>::infinity();
+    const bool p_nan = std::isnan(p[0]) && std::isnan(p[1]) && std::isnan(p[2]) && std::isnan(p[3]);
+    if (denom == T() && !p_nan) {
+        for (int i = 0; i < 4; ++i) r[i] = std::copysign(inf, q[0]) * p[i];
+    } else if (any_inf(p) && all_finite(q)) {
+        box(p);
+        const T c2[4] = {q[0], -q[1], -q[2], -q[3]};
+        hamilton(p, c2, h);
+        for (int i = 0; i < 4; ++i) r[i] = inf * h[i];
+    } else if (logbw == inf && all_finite(p)) {
+        box(q);
+        const T c2[4] = {q[0], -q[1], -q[2], -q[3]};
+        hamilton(p, c2, h);
+        for (int i = 0; i < 4; ++i) r[i] = T() * h[i];
+    }
+}
 }  // namespace detail
 
 /// Quaternion number a + bi + cj + dk over the floating-point type T.
@@ -156,21 +255,30 @@ public:
     /// Right-multiplication: *this = *this * q (Hamilton product).
     template <std::floating_point U>
     constexpr quaternion& operator*=(const quaternion<U>& q) noexcept {
-        const T a2 = static_cast<T>(q.R_component_1()), b2 = static_cast<T>(q.R_component_2());
-        const T c2 = static_cast<T>(q.R_component_3()), d2 = static_cast<T>(q.R_component_4());
-        const T a = a_ * a2 - b_ * b2 - c_ * c2 - d_ * d2;
-        const T b = a_ * b2 + b_ * a2 + c_ * d2 - d_ * c2;
-        const T c = a_ * c2 - b_ * d2 + c_ * a2 + d_ * b2;
-        const T d = a_ * d2 + b_ * c2 - c_ * b2 + d_ * a2;
-        a_ = a; b_ = b; c_ = c; d_ = d;
+        T p[4] = {a_, b_, c_, d_};
+        T r2[4] = {static_cast<T>(q.R_component_1()), static_cast<T>(q.R_component_2()),
+                   static_cast<T>(q.R_component_3()), static_cast<T>(q.R_component_4())};
+        T r[4];
+        detail::hamilton(p, r2, r);
+        if !consteval {
+            detail::mul_recover(p, r2, r);  // Annex G infinity recovery (no-op if finite)
+        }
+        a_ = r[0]; b_ = r[1]; c_ = r[2]; d_ = r[3];
         return *this;
     }
     /// Right-division: *this = *this * q^-1.
     template <std::floating_point U>
     constexpr quaternion& operator/=(const quaternion<U>& q) noexcept {
         const quaternion r(q);
-        const T n = r.a_ * r.a_ + r.b_ * r.b_ + r.c_ * r.c_ + r.d_ * r.d_;
-        *this *= quaternion(r.a_ / n, -r.b_ / n, -r.c_ / n, -r.d_ / n);
+        if consteval {
+            const T n = r.a_ * r.a_ + r.b_ * r.b_ + r.c_ * r.c_ + r.d_ * r.d_;
+            *this *= quaternion(r.a_ / n, -r.b_ / n, -r.c_ / n, -r.d_ / n);
+        } else {
+            // p conj(q) / |q|^2 with q scaled by a power of two; Annex G recovery.
+            T p[4] = {a_, b_, c_, d_}, d[4] = {r.a_, r.b_, r.c_, r.d_}, o[4];
+            detail::div_annexg(p, d, o);
+            a_ = o[0]; b_ = o[1]; c_ = o[2]; d_ = o[3];
+        }
         return *this;
     }
 
@@ -295,7 +403,68 @@ template <class T>
 [[nodiscard]] inline quaternion<T> along(const quaternion<T>& q, T vlen, T s, T v) noexcept {
     if (vlen == T()) return {s, v, T(), T()};
     const T f = v / vlen;
-    return {s, q.x() * f, q.y() * f, q.z() * f};
+    // A zero component times an infinite f is a signed zero, not 0*inf = NaN.
+    const auto m = [f](T x) { return x == T() ? std::copysign(T(), x) * (std::signbit(f) ? T(-1) : T(1)) : x * f; };
+    return {s, m(q.x()), m(q.y()), m(q.z())};
+}
+
+/// Signed zero carrying the sign of the product i * u (copysign(0, u) if i is NaN).
+template <class T>
+[[nodiscard]] inline T zero_prod(T i, T u) noexcept {
+    const bool neg = std::isnan(i) ? std::signbit(u) : (std::signbit(i) != std::signbit(u));
+    return neg ? -T() : T();
+}
+template <class T>
+[[nodiscard]] inline bool is_finite(const quaternion<T>& q) noexcept {
+    return std::isfinite(q.w()) && std::isfinite(q.x()) && std::isfinite(q.y()) &&
+           std::isfinite(q.z());
+}
+template <class T>
+[[nodiscard]] inline bool has_nan(const quaternion<T>& q) noexcept {
+    return std::isnan(q.w()) || std::isnan(q.x()) || std::isnan(q.y()) || std::isnan(q.z());
+}
+
+/// Special-value lift (C99/C11 Annex G mapped to quaternions by axis reduction).
+/// f maps std::complex<T> -> std::complex<T> and is evaluated on the i-axis image z of q:
+///  * vector part zero: z = a + i*b with b = x the *signed* i-component, so q = a + i*(+-0)
+///    is exactly the std::complex argument (a, +-0); the j/k zeros of the result keep their
+///    sign, flipped when the sign of Im f differs from the sign of b (the zeros of the vector
+///    part behave as an infinitesimal vector parallel to i).
+///  * otherwise z = a + i*|v| and the result is Re f + u * Im f with u the unit axis; for an
+///    infinite v, u has components +-1/sqrt(m) on its m infinite components and signed zeros
+///    elsewhere; for a NaN v (no infinity) the NaN components receive Im f.  Zero components
+///    of u always yield signed zeros (sign of the product), never 0*inf = NaN.
+template <class T, class F>
+[[nodiscard]] inline quaternion<T> lift_sv(const quaternion<T>& q, F&& f) {
+    const T vx = q.x(), vy = q.y(), vz = q.z();
+    if (vx == T() && vy == T() && vz == T()) {
+        const std::complex<T> r = f(std::complex<T>(q.w(), vx));
+        const bool flip = !std::isnan(r.imag()) && std::signbit(r.imag()) != std::signbit(vx);
+        const auto z0 = [flip](T z) { return flip ? -z : z; };
+        return {r.real(), r.imag(), z0(vy), z0(vz)};
+    }
+    const T vl = vabs(q);
+    const std::complex<T> r = f(std::complex<T>(q.w(), vl));
+    const T I = r.imag();
+    T u[3] = {vx, vy, vz};
+    if (std::isinf(vl)) {
+        int m = 0;
+        for (T x : u) m += std::isinf(x);
+        const T c = T(1) / std::sqrt(T(m));
+        for (T& x : u) x = std::isinf(x) ? std::copysign(c, x) : std::isnan(x) ? x : std::copysign(T(), x);
+    } else if (std::isnan(vl)) {
+        for (T& x : u) x = std::isnan(x) ? T(1) : std::copysign(T(), x);
+    } else {
+        for (T& x : u) x /= vl;
+    }
+    T o[3];
+    for (int j = 0; j < 3; ++j) o[j] = (u[j] == T()) ? zero_prod(I, u[j]) : I * u[j];
+    return {r.real(), o[0], o[1], o[2]};
+}
+/// True when the special-value path must be used (non-finite input or zero vector part).
+template <class T>
+[[nodiscard]] inline bool needs_sv(const quaternion<T>& q) noexcept {
+    return !is_finite(q) || (q.x() == T() && q.y() == T() && q.z() == T());
 }
 }  // namespace detail
 
@@ -327,42 +496,247 @@ template <class T>
 /// rho * (cos(theta) + i sin(theta)) -- same as std::polar embedded on the i axis.
 template <class T>
 [[nodiscard]] inline quaternion<T> polar(const T& rho, const T& theta = T()) noexcept {
-    return {rho * std::cos(theta), rho * std::sin(theta), T(), T()};
+    const T c = std::cos(theta), s = std::sin(theta);
+    // avoid inf * 0 = NaN for an infinite rho at theta = 0
+    return {c == T() ? detail::zero_prod(rho, c) : rho * c,
+            s == T() ? detail::zero_prod(rho, s) : rho * s, T(), T()};
 }
 /// rho * (cos(theta) + u sin(theta)) with u = axis/|axis| (the vector part of axis).
 template <class T>
 [[nodiscard]] inline quaternion<T> polar(const T& rho, const T& theta,
                                          const quaternion<T>& axis) noexcept {
-    return detail::along(axis, detail::vabs(axis), rho * std::cos(theta), rho * std::sin(theta));
+    const T c = std::cos(theta), s = std::sin(theta);
+    return detail::along(axis, detail::vabs(axis), c == T() ? detail::zero_prod(rho, c) : rho * c,
+                         s == T() ? detail::zero_prod(rho, s) : rho * s);
 }
 
 // ---- transcendental functions ----------------------------------------------
+// Each function has a finite-path evaluator (finite input, nonzero vector part) and an
+// Annex G kernel ag::f(x, y) on std::complex that handles the special values (C11 G.6),
+// reduced to the first quadrant by the symmetries of G.6 and evaluated on the finite
+// path otherwise.  Public functions dispatch through detail::lift_sv for non-finite
+// inputs and inputs with a zero vector part.
+namespace detail::fin {
 template <class T>
 [[nodiscard]] inline quaternion<T> exp(const quaternion<T>& q) noexcept {
-    const T v = detail::vabs(q), e = std::exp(q.w());
-    return detail::along(q, v, e * std::cos(v), e * std::sin(v));
+    const T v = vabs(q), e = std::exp(q.w());
+    return along(q, v, e * std::cos(v), e * std::sin(v));
 }
-/// Principal logarithm ln|q| + u*arg(q). For negative reals the result is ln|a| + pi*i.
 template <class T>
 [[nodiscard]] inline quaternion<T> log(const quaternion<T>& q) noexcept {
-    const T v = detail::vabs(q);
-    return detail::along(q, v, std::log(abs(q)), std::atan2(v, q.w()));
+    const T v = vabs(q);
+    return along(q, v, std::log(quat::abs(q)), std::atan2(v, q.w()));
 }
-template <class T>
-[[nodiscard]] inline quaternion<T> log10(const quaternion<T>& q) noexcept {
-    return log(q) / detail::ln10_v<T>;
-}
-/// Principal square root (non-negative real part).
 template <class T>
 [[nodiscard]] inline quaternion<T> sqrt(const quaternion<T>& q) noexcept {
-    const T v = detail::vabs(q), r = abs(q);
-    if (v == T()) {
-        if (q.w() >= T()) return {std::sqrt(q.w()), q.x(), q.y(), q.z()};
-        return {T(), std::sqrt(-q.w()), T(), T()};
+    // No cancellation: the larger of Re and |Im| comes from (r + |a|)/2, the other from
+    // v / (2 * larger).  (r + |a|)/2 is formed as r/2 + |a|/2 to avoid overflow.
+    const T v = vabs(q), r = quat::abs(q), a = q.w();
+    const T big = std::sqrt(r / T(2) + std::abs(a) / T(2));
+    if (big == T()) return along(q, v, T(), std::sqrt(r));
+    const T small = (v / big) / T(2);
+    return a >= T() ? along(q, v, big, small) : along(q, v, small, big);
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> sinh(const quaternion<T>& q) noexcept {
+    const T v = vabs(q);
+    return along(q, v, std::sinh(q.w()) * std::cos(v), std::cosh(q.w()) * std::sin(v));
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> cosh(const quaternion<T>& q) noexcept {
+    const T v = vabs(q);
+    return along(q, v, std::cosh(q.w()) * std::cos(v), std::sinh(q.w()) * std::sin(v));
+}
+// Kahan's complex tanh ("Branch cuts for complex elementary functions", 1987):
+// tanh(x + i y) without overflow for any finite x, y.
+template <class T>
+[[nodiscard]] inline std::complex<T> kahan_tanh(T x, T y) noexcept {
+    const T cut = T(std::numeric_limits<T>::digits + 4) * ln2_v<T> / T(2);
+    if (std::abs(x) > cut) {
+        const T e = std::exp(-std::abs(x));
+        return {std::copysign(T(1), x), T(4) * std::sin(y) * std::cos(y) * e * e};
     }
-    const T s = std::sqrt((r + q.w()) / T(2));
-    if (s == T()) return detail::along(q, v, T(), std::sqrt(r));
-    return detail::along(q, v, s, v / (T(2) * s));
+    const T t = std::tan(y), b = T(1) + t * t, sh = std::sinh(x), rho = std::sqrt(T(1) + sh * sh);
+    const T den = T(1) + b * sh * sh;
+    return {b * rho * sh / den, t / den};
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> tanh(const quaternion<T>& q) noexcept {
+    const T v = vabs(q);
+    const std::complex<T> w = kahan_tanh(q.w(), v);
+    return along(q, v, w.real(), w.imag());
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> sin(const quaternion<T>& q) noexcept {
+    const T v = vabs(q);
+    return along(q, v, std::sin(q.w()) * std::cosh(v), std::cos(q.w()) * std::sinh(v));
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> cos(const quaternion<T>& q) noexcept {
+    const T v = vabs(q);
+    return along(q, v, std::cos(q.w()) * std::cosh(v), -std::sin(q.w()) * std::sinh(v));
+}
+template <class T>
+[[nodiscard]] inline quaternion<T> tan(const quaternion<T>& q) noexcept {
+    // tan(a + u v) = -i tanh(-v + i a) on the plane of u
+    const T v = vabs(q);
+    const std::complex<T> w = kahan_tanh(-v, q.w());
+    return along(q, v, w.imag(), -w.real());
+}
+}  // namespace detail::fin
+
+namespace detail::ag {
+template <class T>
+using C = std::complex<T>;
+template <class T>
+[[nodiscard]] inline bool fin(T x) noexcept { return std::isfinite(x); }
+// first-quadrant reduction helpers: y is +0, positive or NaN after these
+template <class T>
+[[nodiscard]] inline bool negy(T y) noexcept { return !std::isnan(y) && std::signbit(y); }
+template <class T>
+[[nodiscard]] inline C<T> cj(const C<T>& z) noexcept { return {z.real(), -z.imag()}; }
+template <class T>
+[[nodiscard]] inline C<T> nn() noexcept {
+    return {std::numeric_limits<T>::quiet_NaN(), std::numeric_limits<T>::quiet_NaN()};
+}
+// finite path at x + i y, y > 0
+template <class T, class F>
+[[nodiscard]] inline C<T> on_i(F f, T x, T y) noexcept {
+    const quaternion<T> r = f(quaternion<T>(x, y, T(), T()));
+    return {r.w(), r.x()};
+}
+// infinity * cis(y) for finite nonzero y (the exp/sinh/cosh entries)
+template <class T>
+[[nodiscard]] inline C<T> inf_cis(T y) noexcept {
+    const T inf = std::numeric_limits<T>::infinity();
+    return {inf * std::cos(y), inf * std::sin(y)};
+}
+template <class T>
+[[nodiscard]] inline C<T> exp(T x, T y) noexcept {
+    if (negy(y)) return cj(exp(x, -y));
+    const T inf = std::numeric_limits<T>::infinity();
+    if (fin(x)) {
+        if (y == T()) return {std::exp(x), y};
+        return fin(y) ? on_i([](const quaternion<T>& q) { return fin::exp(q); }, x, y) : nn<T>();
+    }
+    if (x == inf) return y == T() ? C<T>(inf, y) : fin(y) ? inf_cis(y) : C<T>(inf, y - y);
+    if (x == -inf)
+        return fin(y) ? C<T>(std::copysign(T(), std::cos(y)), std::copysign(T(), std::sin(y)))
+                      : C<T>(T(), T());
+    return y == T() ? C<T>(x, y) : nn<T>();
+}
+template <class T>
+[[nodiscard]] inline C<T> log(T x, T y) noexcept {
+    if (negy(y)) return cj(log(x, -y));
+    const T inf = std::numeric_limits<T>::infinity(), pi = pi_v<T>;
+    if (std::isinf(y)) return std::isnan(x) ? C<T>(inf, x) : C<T>(inf, std::atan2(y, x));
+    if (std::isnan(y)) return std::isinf(x) ? C<T>(inf, y) : nn<T>();
+    if (std::isinf(x)) return {inf, std::atan2(y, x)};
+    if (std::isnan(x)) return nn<T>();
+    if (y == T()) {
+        if (x == T()) return {-inf, std::signbit(x) ? pi : T()};
+        return x > T() ? C<T>(std::log(x), y) : C<T>(std::log(-x), pi);
+    }
+    return on_i([](const quaternion<T>& q) { return fin::log(q); }, x, y);
+}
+template <class T>
+[[nodiscard]] inline C<T> log10(T x, T y) noexcept {
+    const C<T> r = log(x, y);
+    if (fin(x) && fin(y) && y != T()) {
+        const quaternion<T> q = fin::log(quaternion<T>(x, std::abs(y), T(), T())) / ln10_v<T>;
+        return {q.w(), std::copysign(q.x(), y)};
+    }
+    return {r.real() / ln10_v<T>, r.imag() / ln10_v<T>};
+}
+template <class T>
+[[nodiscard]] inline C<T> sqrt(T x, T y) noexcept {
+    if (negy(y)) return cj(sqrt(x, -y));
+    const T inf = std::numeric_limits<T>::infinity();
+    if (y == inf) return {inf, inf};
+    if (x == -inf) return fin(y) ? C<T>(T(), inf) : C<T>(y, inf);
+    if (x == inf) return fin(y) ? C<T>(inf, T()) : C<T>(inf, y);
+    if (std::isnan(x) || std::isnan(y)) return nn<T>();
+    if (y == T()) return x >= T() ? C<T>(x == T() ? T() : std::sqrt(x), y) : C<T>(T(), std::sqrt(-x));
+    return on_i([](const quaternion<T>& q) { return fin::sqrt(q); }, x, y);
+}
+template <class T>
+[[nodiscard]] inline C<T> sinh(T x, T y) noexcept {
+    if (!std::isnan(x) && std::signbit(x)) return -sinh(-x, -y);
+    if (negy(y)) return cj(sinh(x, -y));
+    const T inf = std::numeric_limits<T>::infinity();
+    if (fin(x)) {
+        if (!fin(y)) return x == T() ? C<T>(x, y - y) : nn<T>();
+        if (y == T()) return {std::sinh(x), y};
+        return on_i([](const quaternion<T>& q) { return fin::sinh(q); }, x, y);
+    }
+    if (x == inf) return y == T() ? C<T>(x, y) : fin(y) ? inf_cis(y) : C<T>(inf, y - y);
+    return y == T() ? C<T>(x, y) : nn<T>();
+}
+template <class T>
+[[nodiscard]] inline C<T> cosh(T x, T y) noexcept {
+    if (!std::isnan(x) && std::signbit(x)) return cosh(-x, -y);
+    if (negy(y)) return cj(cosh(x, -y));
+    const T inf = std::numeric_limits<T>::infinity();
+    if (fin(x)) {
+        if (!fin(y)) return x == T() ? C<T>(y - y, T()) : nn<T>();
+        if (y == T()) return {std::cosh(x), y};
+        return on_i([](const quaternion<T>& q) { return fin::cosh(q); }, x, y);
+    }
+    if (x == inf) return y == T() ? C<T>(x, y) : fin(y) ? inf_cis(y) : C<T>(inf, y - y);
+    return y == T() ? C<T>(x, y) : nn<T>();
+}
+template <class T>
+[[nodiscard]] inline C<T> tanh(T x, T y) noexcept {
+    if (!std::isnan(x) && std::signbit(x)) return -tanh(-x, -y);
+    if (negy(y)) return cj(tanh(x, -y));
+    const T inf = std::numeric_limits<T>::infinity();
+    if (fin(x)) {
+        if (!fin(y)) return x == T() ? C<T>(x, y - y) : nn<T>();  // C23: ctanh(+0+i inf) = +0+iNaN
+        if (y == T()) return {std::tanh(x), y};
+        return on_i([](const quaternion<T>& q) { return fin::tanh(q); }, x, y);
+    }
+    if (x == inf) return {T(1), fin(y) ? std::copysign(T(), std::sin(T(2) * y)) : T()};
+    return y == T() ? C<T>(x, y) : nn<T>();
+}
+// f(z) = -i g(i z): with g(-y + i x) = R + i I, f = I - i R (exact)
+template <class T>
+[[nodiscard]] inline C<T> mi(const C<T>& w) noexcept { return {w.imag(), -w.real()}; }
+template <class T>
+[[nodiscard]] inline C<T> sin(T x, T y) noexcept { return mi(sinh(-y, x)); }
+template <class T>
+[[nodiscard]] inline C<T> cos(T x, T y) noexcept { return cosh(-y, x); }
+template <class T>
+[[nodiscard]] inline C<T> tan(T x, T y) noexcept { return mi(tanh(-y, x)); }
+}  // namespace detail::ag
+
+#define QUAT_AG_FN(NAME)                                                                   \
+    template <class T>                                                                     \
+    [[nodiscard]] inline quaternion<T> NAME(const quaternion<T>& q) noexcept {             \
+        if (detail::needs_sv(q))                                                           \
+            return detail::lift_sv(                                                        \
+                q, [](const std::complex<T>& z) { return detail::ag::NAME(z.real(), z.imag()); }); \
+        return detail::fin::NAME(q);                                                       \
+    }
+/// exp(a + u v) = e^a (cos v + u sin v).
+QUAT_AG_FN(exp)
+/// Principal logarithm ln|q| + u*arg(q). For negative reals ln|a| + pi*i (-pi*i if the i
+/// component is -0, as std::log).
+QUAT_AG_FN(log)
+/// Principal square root (non-negative real part).
+QUAT_AG_FN(sqrt)
+QUAT_AG_FN(sin)
+QUAT_AG_FN(cos)
+QUAT_AG_FN(tan)
+QUAT_AG_FN(sinh)
+QUAT_AG_FN(cosh)
+QUAT_AG_FN(tanh)
+#undef QUAT_AG_FN
+template <class T>
+[[nodiscard]] inline quaternion<T> log10(const quaternion<T>& q) noexcept {
+    if (detail::needs_sv(q))
+        return detail::lift_sv(
+            q, [](const std::complex<T>& z) { return detail::ag::log10(z.real(), z.imag()); });
+    return detail::fin::log(q) / detail::ln10_v<T>;
 }
 
 /// Integer power by repeated squaring (exact for small integer exponents).
@@ -399,35 +773,6 @@ template <class T>
 template <class T>
 [[nodiscard]] inline quaternion<T> pow(const std::complex<T>& z, const quaternion<T>& p) noexcept {
     return pow(quaternion<T>(z), p);
-}
-
-template <class T>
-[[nodiscard]] inline quaternion<T> sin(const quaternion<T>& q) noexcept {
-    const T v = detail::vabs(q);
-    return detail::along(q, v, std::sin(q.w()) * std::cosh(v), std::cos(q.w()) * std::sinh(v));
-}
-template <class T>
-[[nodiscard]] inline quaternion<T> cos(const quaternion<T>& q) noexcept {
-    const T v = detail::vabs(q);
-    return detail::along(q, v, std::cos(q.w()) * std::cosh(v), -std::sin(q.w()) * std::sinh(v));
-}
-template <class T>
-[[nodiscard]] inline quaternion<T> tan(const quaternion<T>& q) noexcept {
-    return sin(q) * inverse(cos(q));  // sin(q) and cos(q) commute (same axis)
-}
-template <class T>
-[[nodiscard]] inline quaternion<T> sinh(const quaternion<T>& q) noexcept {
-    const T v = detail::vabs(q);
-    return detail::along(q, v, std::sinh(q.w()) * std::cos(v), std::cosh(q.w()) * std::sin(v));
-}
-template <class T>
-[[nodiscard]] inline quaternion<T> cosh(const quaternion<T>& q) noexcept {
-    const T v = detail::vabs(q);
-    return detail::along(q, v, std::cosh(q.w()) * std::cos(v), std::sinh(q.w()) * std::sin(v));
-}
-template <class T>
-[[nodiscard]] inline quaternion<T> tanh(const quaternion<T>& q) noexcept {
-    return sinh(q) * inverse(cosh(q));
 }
 
 // ---- stream I/O: "(a,b,c,d)" like std::complex -------------------------------

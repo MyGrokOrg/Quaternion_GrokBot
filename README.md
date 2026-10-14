@@ -63,7 +63,8 @@ All members are `constexpr` and `noexcept`. Accessors are `[[nodiscard]]`.
 ### Non-member operators
 
 * `+ - * /` for every combination of quaternion, `T` and `std::complex<T>` (they are hidden friends, so `q * 2` works).
-* `p / q` is defined as `p * inverse(q)`. `s / q` is `s * inverse(q)`.
+* `p / q` is `p·conj(q)/‖q‖²` with `q` first scaled by a power of two (as C's `_Cdivd`), so it does not overflow or underflow for large or tiny `q`. In a constant expression it is `p * inverse(q)`. `s / q` is `s * inverse(q)`.
+* `*` and `/` recover infinities as C11 Annex G (G.5.1) does; see [Infinities, NaNs and signed zeros](#infinities-nans-and-signed-zeros-c-annex-g).
 * `==`, and `!=` through C++20 rewriting, against quaternion, `T` and `std::complex<T>` in either order.
 * `operator<<` prints `(a,b,c,d)`. It honors the stream's flags, precision and locale, and the width applies to the whole text, as with `std::complex`.
 * `operator>>` reads `a`, `(a)`, `(a,b)`, `(a,b,c)` or `(a,b,c,d)`. On malformed input it sets `failbit` and leaves the target unchanged.
@@ -87,7 +88,7 @@ All members are `constexpr` and `noexcept`. Accessors are `[[nodiscard]]`.
 
 ### Transcendental functions
 
-Write `q = a + u·θ`, where `u` is the unit vector of `q` and θ = ‖v‖. Every function below keeps `q`'s axis `u`, and on that axis it agrees exactly with the `std::complex` function. Real arguments use the `i` axis, so `log(-1) = πi` and `sqrt(-4) = 2i`.
+Write `q = a + u·θ`, where `u` is the unit vector of `q` and θ = ‖v‖. Every function below keeps `q`'s axis `u`, and on that axis it agrees exactly with the `std::complex` function. Real arguments use the `i` axis, so `log(-1) = πi` and `sqrt(-4) = 2i`. The sign of a zero `i` component selects the side of a branch cut exactly as for `std::complex`: `log(quaternion(-1.0, -0.0, 0, 0)) = −πi`.
 
 | Function | Definition |
 |---|---|
@@ -99,8 +100,31 @@ Write `q = a + u·θ`, where `u` is the unit vector of `q` and θ = ‖v‖. Eve
 | `pow(q, T x)` | `exp(x·log q)` |
 | `pow(q, p)` | `exp(p·log q)`, the same operand order as `std::pow` for complex. Note that this is not `exp(log q·p)`. |
 | `pow(T x, p)`, `pow(q, complex)`, `pow(complex, p)` | The same definition after converting the arguments. |
-| `sin cos tan` | `sin(q) = sin a cosh θ + u cos a sinh θ`, and so on. `tan = sin·cos⁻¹`. |
-| `sinh cosh tanh` | `sinh(q) = sinh a cos θ + u cosh a sin θ`, and so on. |
+| `sin cos tan` | `sin(q) = sin a cosh θ + u cos a sinh θ`, and so on. `tan(q) = −u·tanh(u q)`, with Kahan's overflow-free complex tanh. |
+| `sinh cosh tanh` | `sinh(q) = sinh a cos θ + u cosh a sin θ`, and so on. `tanh` uses Kahan's algorithm (no overflow for large `a` or θ). |
+
+### Infinities, NaNs and signed zeros (C Annex G)
+
+The elementary functions (`exp log log10 sqrt pow sin cos tan sinh cosh tanh asin acos atan asinh acosh atanh`), the arithmetic operators, `abs`, `arg`, `proj` and `polar` follow C11 Annex G (G.5–G.6) and C23. On the `i` axis they reproduce the Annex G special-value tables of `std::complex` (`cexp`, `clog`, `csqrt`, `csinh`, `ccosh`, `ctanh`, `casinh`, `cacosh`, `catanh`, `cacos`, and through the Annex G identities `csin`, `ccos`, `ctan`, `casin`, `catan`). The library uses its own kernels for these, not the C library's, so the results are the same on libstdc++ and libc++.
+
+A quaternion `q = a + v` is mapped to the complex number `z = a + i·|v|` and back. The vector part plays the imaginary part:
+
+* **Vector part zero** (all of `b, c, d` are ±0). Then `z = a + i·b`, where `b` is the signed `i` component. So `(a, ±0, ±0, ±0)` is the `std::complex` argument `(a, ±0)`, and the result `R + iI` is returned as `(R, I, c′, d′)`. The `j` and `k` zeros keep their signs, and both flip when the sign of `I` differs from the sign of `b`: they behave like an infinitesimal vector parallel to `i`. For example, `sqrt(-4, -0, +0, -0) = (+0, −2, +0, −0)` (no flip), and `acos(2, +0, +0, −0) = (+0, −1.3169…, −0, +0)` (flipped, since Im is negative while b = +0).
+* **Nonzero vector part.** Then `z = a + i·|v|` (with `|v| ≥ 0`) and the result is `R + u·I`, where `u = v/|v|`. If `|v|` is infinite, `u` has components `±1/√m` on its `m` infinite components and signed zeros elsewhere. If `v` has a NaN and no infinity, the NaN components receive `I` and the others become signed zeros.
+* A zero component of `u` always yields a signed zero, whose sign is the product of the signs of `I` and the component (just the component's sign if `I` is NaN), and never `0·∞ = NaN`. So `exp(−∞, 0, 3, 0) = (−0, +0, +0, +0)` (cexp(−∞ + 3i) = +0·cis 3), and at the pole `atan(0, 0, 1, 0) = (0, +0, +∞, +0)`.
+* Annex G entries whose sign is "unspecified" carry that freedom over to the components of `u`.
+
+**Multiplication and division** use the recovery of C11 G.5.1 (`_Cmultd`, `_Cdivd`), generalized to four components. It applies only when the naive result is NaN in all four components:
+
+* `∞·x` with `x` nonzero, or a NaN in the other operand, gives an infinity. The infinite operand is "boxed" (infinite components to ±1, the others to ±0), the product is recomputed and then scaled by ∞.
+* `x/0` (with `x` not all NaN) is `∞·x`.
+* `∞/finite` is infinite, and `finite/∞` is a (signed) zero.
+
+**Other functions.** `abs` is a nested `hypot`, so it is `+∞` if any component is infinite, even with NaNs. `arg` is `atan2(|v|, a)` ∈ [0, π]; it is never negative, because `|v| ≥ 0`. `proj` is as `std::proj`. `polar(∞, 0)` is `(∞, +0, 0, 0)`, not `∞·0 = NaN`. `pow(q, p) = exp(p·log q)`, and `pow(0, p)` is `1` for `p == 0` and `0` otherwise.
+
+`tests/test_annexg.cpp` checks every Annex G table entry (G.6.1.1–G.6.3.2, with the values ±0, ±½, ±1, ±1.5, ±2, ±∞ and NaN) for `float`, `double` and `long double`. It does this on the `i` axis with both signs of the `j`/`k` zeros, and lifted to the axes `i`, `j`, `−k`, `(1,−1,0)/√2` and `(1,1,−1)/√3` and their negatives. Every sign is checked, except where Annex G leaves it unspecified. `ctanh(±0 ± i∞)` may be `NaN + iNaN` (C11) or `±0 + iNaN` (C23); the library returns the C23 value.
+
+**`-ffast-math` caveat.** `-ffast-math` (and `-ffinite-math-only`, `-fno-signed-zeros`, `/fp:fast`) let the compiler assume that no infinities, NaNs or signed zeros occur. It may then delete the `isnan`/`isinf` tests and the sign handling above. Annex G behavior is only guaranteed without these flags. Finite results are unaffected apart from the usual fast-math reassociation.
 
 ### Special functions (`<quaternion/special_functions.hpp>`, included by `<quaternion.hpp>`)
 
@@ -123,7 +147,7 @@ So `f(q)` lies in the same complex plane as `q` and commutes with it. On the `i`
 | `riemann_zeta(q)` | ζ. On `Re ≥ ½`, uses Borwein's η algorithm for `|Im s| ≤ 1` and Euler–Maclaurin summation otherwise. The Euler–Maclaurin sum takes N ≈ 0.6·|s| + 20 terms plus up to 20 Bernoulli corrections, so there is no cap on `|Im s|`; the cost is O(|s|). On `Re < ½` it uses the functional equation. The phases `Im(s)·log k`, the partial sum and the functional-equation exponent are carried in double-length arithmetic. ζ(1) = ∞, ζ(0) = −½, and the trivial zeros are exact. |
 | `cyl_bessel_j(n, q)` | J_n for integer `n` (an entire function). Uses the power series for `|z| ≤ 1`. Otherwise it uses Miller's backward recurrence, normalized by `1 = J₀ + 2ΣJ₂ₖ` or `cos z = J₀ + 2Σ(−1)ᵏJ₂ₖ`, whichever cancels less. |
 
-**Branch cuts.** The complex kernel is only evaluated on the closed upper half-plane, since `|v| ≥ 0`. On a branch cut along the real axis, the result is the limit from above (imaginary part +0), which is what `std::complex` gives for `(x, +0)`. For example, `asin(2) = π/2 + 1.3169…i`, `lgamma(−2.5) = −0.0562… − 3πi`, and `log1p(−3) = log 2 + πi`. Any imaginary part of a real argument goes on the `i` axis, as with `sqrt` and `log`.
+**Branch cuts.** For a nonzero vector part, the complex kernel is only evaluated on the closed upper half-plane, since `|v| ≥ 0`. On a branch cut along the real axis, the result is the limit from above (imaginary part +0), which is what `std::complex` gives for `(x, +0)`. For `asin acos atan asinh acosh atanh`, a real argument with a −0 `i` component gives the lower side, as `std::complex` does for `(x, −0)`; the other special functions always use the upper side. For example, `asin(2) = π/2 + 1.3169…i`, `lgamma(−2.5) = −0.0562… − 3πi`, and `log1p(−3) = log 2 + πi`. Any imaginary part of a real argument goes on the `i` axis, as with `sqrt` and `log`.
 
 **Accuracy.** The kernels run in at least double precision, so `float` results are close to correctly rounded. Measured against mpmath at 2,800 random points (|Re| ≤ 40, |Im| ≤ 60), the worst relative error was:
 
@@ -264,7 +288,8 @@ Q v = r * 1.0_i * conj(r);                              // ≈ (0,0,1,0)
 * The special functions lift a complex kernel in one argument. Every other parameter (an order, a degree, the modulus `k`, the Hurwitz `a`, the incomplete gamma/beta `a` and `b`) must be real.
 * **libc++ and `long double`.** libc++ 18/19 gives only double-precision `std::numbers` constants for `long double`, and it divides `complex<long double>` values in double precision. Its `long double` complex `asin`, `acos`, `asinh` and `acosh` are good to only about 1e-16, and they overflow for huge arguments. This library therefore carries its own constants, its own complex division (Smith's algorithm), and its own inverse trigonometric and hyperbolic kernels. All of them are a few ulp on every library.
 * The transcendental functions are not `constexpr`, because `<cmath>` is not `constexpr` until C++26. All arithmetic, `norm`, `conj`, `inverse`, `dot`, `cross` and integer `pow` are `constexpr`.
-* No special IEEE handling of infinities and NaNs (C99 Annex G style) is done beyond `proj` and `abs`.
+* Annex G special values cover the elementary functions and arithmetic, but not the other special functions (gamma, zeta, Bessel, …). With non-finite input these return whatever their kernels produce, usually NaN.
+* For large ‖v‖, `exp`, `sin`, `cos`, `sinh`, `cosh` and `tanh` inherit the conditioning of the rounded θ = ‖v‖: a relative error of ε·θ in `cos θ`/`sin θ`. These errors are unchanged by the Annex G work.
 * In a `std::format` spec, the width applies to each component, not to the whole quaternion.
 
 ## Example

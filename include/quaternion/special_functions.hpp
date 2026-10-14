@@ -2020,8 +2020,11 @@ template <class T, class F>
         return {static_cast<T>(r.real()), static_cast<T>(r.imag()), T(), T()};
     }
     const W s = r.imag() / v;
-    return {static_cast<T>(r.real()), static_cast<T>(static_cast<W>(q.x()) * s),
-            static_cast<T>(static_cast<W>(q.y()) * s), static_cast<T>(static_cast<W>(q.z()) * s)};
+    // zero components give signed zeros (never 0 * inf = NaN at a pole)
+    const auto m = [s](T x) {
+        return x == T() ? quat::detail::zero_prod(static_cast<T>(s), x) : static_cast<T>(static_cast<W>(x) * s);
+    };
+    return {static_cast<T>(r.real()), m(q.x()), m(q.y()), m(q.z())};
 }
 
 }  // namespace detail::sf
@@ -2033,13 +2036,101 @@ template <class T, class F>
             q, [](const auto& z) { return EXPR; }, REAL);                                \
     }
 
-// Inverse trigonometric and hyperbolic functions (std::complex branch cuts).
-QUAT_SF_LIFT(asin, detail::sf::asin(z), false)
-QUAT_SF_LIFT(acos, detail::sf::acos(z), false)
-QUAT_SF_LIFT(atan, detail::sf::atan(z), false)
-QUAT_SF_LIFT(asinh, detail::sf::asinh(z), false)
-QUAT_SF_LIFT(acosh, detail::sf::acosh(z), false)
-QUAT_SF_LIFT(atanh, detail::sf::atanh(z), false)
+// Inverse trigonometric and hyperbolic functions (std::complex branch cuts).  Non-finite
+// inputs and inputs with a zero vector part (signed zero on the cut) follow Annex G
+// through quat::detail::lift_sv and std::complex.
+namespace detail::sf::ag {
+// Annex G (C11 G.6.1-G.6.2) kernels for the inverse functions on std::complex<T>, reduced to
+// y >= +0 (conjugate symmetry) and, for the odd functions, x >= +0; finite points use the
+// accurate kernels above.
+using quat::detail::ag::negy;
+using quat::detail::ag::cj;
+using quat::detail::ag::nn;
+using quat::detail::ag::mi;
+template <class T>
+using C = std::complex<T>;
+// finite kernel at x + i y with zeros of the result given fixed signs (zre, zim)
+template <class T, class F>
+[[nodiscard]] inline C<T> fk(F f, T x, T y, T zre, T zim) {
+    using W = work_t<T>;
+    const cplx<W> r = f(cplx<W>(static_cast<W>(x), static_cast<W>(y)));
+    const T re = static_cast<T>(r.real()), im = static_cast<T>(r.imag());
+    return {re == T() ? zre : re, im == T() ? zim : im};
+}
+template <class T>
+[[nodiscard]] inline C<T> asinh(T x, T y) {
+    if (!std::isnan(x) && std::signbit(x)) return -asinh(-x, -y);
+    if (negy(y)) return cj(asinh(x, -y));
+    const T inf = std::numeric_limits<T>::infinity(), pi = quat::detail::pi_v<T>;
+    if (std::isinf(y)) return std::isnan(x) ? C<T>(inf, x) : C<T>(inf, std::isinf(x) ? pi / 4 : pi / 2);
+    if (std::isinf(x)) return {inf, std::isnan(y) ? y : T()};
+    if (std::isnan(x)) return y == T() ? C<T>(x, y) : nn<T>();
+    if (std::isnan(y)) return nn<T>();
+    if (x == T() && y == T()) return {x, y};
+    return fk([](const auto& z) { return asinh(z); }, x, y, T(), T());
+}
+template <class T>
+[[nodiscard]] inline C<T> atanh(T x, T y) {
+    if (!std::isnan(x) && std::signbit(x)) return -atanh(-x, -y);
+    if (negy(y)) return cj(atanh(x, -y));
+    const T inf = std::numeric_limits<T>::infinity(), pi = quat::detail::pi_v<T>;
+    if (std::isinf(y)) return {T(), pi / 2};
+    if (std::isinf(x)) return {T(), std::isnan(y) ? y : pi / 2};
+    if (std::isnan(x)) return nn<T>();
+    if (std::isnan(y)) return x == T() ? C<T>(x, y) : nn<T>();
+    if (y == T()) {
+        if (x == T()) return {x, y};
+        if (x == T(1)) return {inf, y};
+    }
+    return fk([](const auto& z) { return atanh(z); }, x, y, T(), T());
+}
+template <class T>
+[[nodiscard]] inline C<T> acosh(T x, T y) {
+    if (negy(y)) return cj(acosh(x, -y));
+    const T inf = std::numeric_limits<T>::infinity(), pi = quat::detail::pi_v<T>;
+    if (std::isinf(y))
+        return std::isnan(x) ? C<T>(inf, x)
+                             : C<T>(inf, x == -inf ? 3 * pi / 4 : x == inf ? pi / 4 : pi / 2);
+    if (std::isnan(y)) return std::isinf(x) ? C<T>(inf, y) : nn<T>();
+    if (std::isinf(x)) return {inf, x < T() ? pi : T()};
+    if (std::isnan(x)) return nn<T>();
+    if (x == T() && y == T()) return {T(), pi / 2};
+    return fk([](const auto& z) { return acosh(z); }, x, y, T(), T());
+}
+template <class T>
+[[nodiscard]] inline C<T> acos(T x, T y) {
+    if (negy(y)) return cj(acos(x, -y));
+    const T inf = std::numeric_limits<T>::infinity(), pi = quat::detail::pi_v<T>;
+    if (std::isinf(y))
+        return std::isnan(x) ? C<T>(x, -inf)
+                             : C<T>(x == -inf ? 3 * pi / 4 : x == inf ? pi / 4 : pi / 2, -inf);
+    if (std::isnan(y)) return std::isinf(x) ? C<T>(y, inf) : x == T() ? C<T>(pi / 2, y) : nn<T>();
+    if (std::isinf(x)) return {x < T() ? pi : T(), -inf};
+    if (std::isnan(x)) return nn<T>();
+    if (x == T() && y == T()) return {pi / 2, -T()};
+    return fk([](const auto& z) { return acos(z); }, x, y, T(), -T());
+}
+template <class T>
+[[nodiscard]] inline C<T> asin(T x, T y) { return mi(asinh(-y, x)); }
+template <class T>
+[[nodiscard]] inline C<T> atan(T x, T y) { return mi(atanh(-y, x)); }
+}  // namespace detail::sf::ag
+#define QUAT_SF_LIFT_G(NAME, EXPR)                                                       \
+    template <class T>                                                                   \
+    [[nodiscard]] inline quaternion<T> NAME(const quaternion<T>& q) noexcept {           \
+        if (quat::detail::needs_sv(q))                                                   \
+            return quat::detail::lift_sv(                                                \
+                q, [](const std::complex<T>& z) { return detail::sf::ag::NAME(z.real(), z.imag()); }); \
+        return detail::sf::lift(                                                         \
+            q, [](const auto& z) { return EXPR; }, false);                               \
+    }
+QUAT_SF_LIFT_G(asin, detail::sf::asin(z))
+QUAT_SF_LIFT_G(acos, detail::sf::acos(z))
+QUAT_SF_LIFT_G(atan, detail::sf::atan(z))
+QUAT_SF_LIFT_G(asinh, detail::sf::asinh(z))
+QUAT_SF_LIFT_G(acosh, detail::sf::acosh(z))
+QUAT_SF_LIFT_G(atanh, detail::sf::atanh(z))
+#undef QUAT_SF_LIFT_G
 
 // Elementary functions with good accuracy near zero.
 QUAT_SF_LIFT(expm1, detail::sf::expm1(z), true)
