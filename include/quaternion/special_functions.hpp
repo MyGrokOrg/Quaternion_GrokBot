@@ -1115,11 +1115,11 @@ template <class T>
     const cplx<T> d = -std::log(x2);
     const cplx<T> e = a * d;
     const T fact = a == T() ? T(1) : a * pi<T> / sinpi(a);
-    const cplx<T> fact2 = std::abs(e) < eps<T>() ? cplx<T>(T(1)) : std::sinh(e) / e;
+    const cplx<T> fact2 = std::abs(e) < eps<T>() ? cplx<T>(T(1)) : cdiv(std::sinh(e), e);
     cplx<T> ff = fact * (g1 * std::cosh(e) + g2 * fact2 * d);
     cplx<T> sum = ff;
     const cplx<T> ee = std::exp(e);
-    cplx<T> p = T(0.5) * ee / gp, q = T(0.5) / (ee * gm);
+    cplx<T> p = T(0.5) * ee / gp, q = cdiv(T(0.5), ee * gm);  // cdiv: libc++ divides long double complex in double
     cplx<T> cc(T(1));
     const cplx<T> x22 = x2 * x2;
     cplx<T> sum1 = p, c0{}, c1{};
