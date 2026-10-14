@@ -52,6 +52,22 @@ template <class T>
 template <class T>
 [[nodiscard]] inline T nan() noexcept { return std::numeric_limits<T>::quiet_NaN(); }
 
+// Complex division by Smith's algorithm.  (libc++ 18/19 divides complex<long double>
+// in double precision, so the kernels never use operator/ between complex values.)
+template <class T>
+[[nodiscard]] inline cplx<T> cdiv(const cplx<T>& a, const cplx<T>& b) noexcept {
+    const T br = b.real(), bi = b.imag();
+    if (br == T() && bi == T()) return {a.real() / br, a.imag() / br};
+    if (std::abs(br) >= std::abs(bi)) {
+        const T r = bi / br, d = br + bi * r;
+        return {(a.real() + a.imag() * r) / d, (a.imag() - a.real() * r) / d};
+    }
+    const T r = br / bi, d = br * r + bi;
+    return {(a.real() * r + a.imag()) / d, (a.imag() * r - a.real()) / d};
+}
+template <class T>
+[[nodiscard]] inline cplx<T> cdiv(const T& a, const cplx<T>& b) noexcept { return cdiv(cplx<T>(a), b); }
+
 // sin(pi x) and cos(pi x) for real x, with exact zeros at integers and half-integers.
 template <class T>
 [[nodiscard]] inline T sinpi(T x) noexcept {
@@ -130,7 +146,7 @@ template <class T>
         for (long k = 0; k < n; ++k) shift_sum += std::log(z + T(k));
         z += T(n);
     }
-    const cplx<T> inv = T(1) / z, inv2 = inv * inv;
+    const cplx<T> inv = cdiv(T(1), z), inv2 = inv * inv;
     cplx<T> series{}, p = inv;
     for (int k = 1; k <= stirling_terms; ++k) {
         series += bernoulli_2k<T>(k) / T(2 * k * (2 * k - 1)) * p;
@@ -149,7 +165,7 @@ template <class T>
     }
     if (z.real() < T(0.5)) {
         // Reflection: Gamma(z) Gamma(1-z) = pi / sin(pi z).
-        return pi<T> / (sinpi(z) * tgamma(cplx<T>(T(1)) - z));
+        return cdiv(pi<T>, sinpi(z) * tgamma(cplx<T>(T(1)) - z));
     }
     return std::exp(lgamma(z));
 }
@@ -160,14 +176,14 @@ template <class T>
     if (is_nonpositive_integer(z)) return {nan<T>(), T()};
     if (z.real() < T(0.5)) {
         // psi(1-z) - psi(z) = pi cot(pi z)
-        return digamma(cplx<T>(T(1)) - z) - pi<T> * cospi(z) / sinpi(z);
+        return digamma(cplx<T>(T(1)) - z) - cdiv(pi<T> * cospi(z), sinpi(z));
     }
     cplx<T> shift_sum{};
     while (z.real() < stirling_shift<T>) {
-        shift_sum += T(1) / z;
+        shift_sum += cdiv(T(1), z);
         z += T(1);
     }
-    const cplx<T> inv = T(1) / z, inv2 = inv * inv;
+    const cplx<T> inv = cdiv(T(1), z), inv2 = inv * inv;
     cplx<T> series{}, p = inv2;
     for (int k = 1; k <= stirling_terms; ++k) {
         series += bernoulli_2k<T>(k) / T(2 * k) * p;
@@ -226,14 +242,14 @@ template <class T>
         const T a = T(k) / T(2);
         D = z + a * D;
         if (std::abs(D) < tiny) D = tiny;
-        D = T(1) / D;
-        C = z + a / C;
+        D = cdiv(T(1), D);
+        C = z + cdiv(a, C);
         if (std::abs(C) < tiny) C = tiny;
         const cplx<T> delta = C * D;
         f *= delta;
         if (std::abs(delta - T(1)) <= eps<T>() / 2) break;
     }
-    return std::exp(-z * z) / (std::sqrt(pi<T>) * f);
+    return cdiv(std::exp(-z * z), std::sqrt(pi<T>) * f);
 }
 template <class T>
 [[nodiscard]] inline cplx<T> erf(const cplx<T>& z) noexcept {
@@ -301,7 +317,7 @@ template <class T>
     }
     // 1 - 2^(1-s) = -expm1((1-s) ln 2), accurate near s = 1.
     const cplx<T> denom = -expm1((cplx<T>(T(1)) - s) * std::log(T(2)));
-    return eta / denom;
+    return cdiv(eta, denom);
 }
 
 // ---- Bessel J_n, integer order ----------------------------------------------------
@@ -334,7 +350,7 @@ template <class T>
     const long M0 = static_cast<long>(std::max(T(n), az) + T(10) + T(3) * digits +
                                       T(6) * std::cbrt(az));
     const long M = M0 + (M0 % 2);  // even start
-    const cplx<T> two_over_z = T(2) / z;
+    const cplx<T> two_over_z = cdiv(T(2), z);
     cplx<T> fk1{}, fk(std::numeric_limits<T>::min() * T(1e20));  // f_{M+1}, f_M
     cplx<T> s1{}, s2{}, fn{};
     T abssum{};
@@ -359,8 +375,8 @@ template <class T>
     abssum += std::abs(fk);
     if (n == 0) fn = fk;
     const T c1 = abssum / std::abs(s1), c2 = abssum / std::abs(s2);
-    if (!(c2 < c1)) return fn / s1;
-    return fn * std::cos(z) / s2;
+    if (!(c2 < c1)) return cdiv(fn, s1);
+    return cdiv(fn * std::cos(z), s2);
 }
 
 // std::acos with an exact pi/2 at zero (libc++ 19 returns a double-precision pi/2
@@ -369,6 +385,24 @@ template <class T>
 [[nodiscard]] inline cplx<T> acos(const cplx<T>& z) noexcept {
     if (z.real() == T() && z.imag() == T()) return {pi<T> / T(2), -z.imag()};
     return std::acos(z);
+}
+
+// atanh and atan with the C99/std::complex branch cuts, written in terms of log1p
+// and cdiv (libc++'s complex<long double> versions lose precision through division).
+//   atanh z = (log1p z - log1p(-z)) / 2                       for |z| <= 1
+//   atanh z = atanh(1/z) + i copysign(pi/2, Im z)              for |z| >  1
+//   atan  z = -i atanh(i z)
+template <class T>
+[[nodiscard]] inline cplx<T> atanh(const cplx<T>& z) noexcept {
+    if (std::isnan(z.real()) || std::isnan(z.imag())) return std::atanh(z);
+    if (std::abs(z) <= T(1)) return (log1p(z) - log1p(-z)) / T(2);
+    const cplx<T> w = sf::atanh(cdiv(T(1), z));
+    return {w.real(), w.imag() + std::copysign(pi<T> / T(2), z.imag())};
+}
+template <class T>
+[[nodiscard]] inline cplx<T> atan(const cplx<T>& z) noexcept {
+    const cplx<T> w = sf::atanh(cplx<T>(-z.imag(), z.real()));
+    return {w.imag(), -w.real()};
 }
 
 // ---- the axis-reduction lift ----------------------------------------------------------
@@ -400,10 +434,10 @@ template <class T, class F>
 // Inverse trigonometric and hyperbolic functions (std::complex branch cuts).
 QUAT_SF_LIFT(asin, std::asin(z), false)
 QUAT_SF_LIFT(acos, detail::sf::acos(z), false)
-QUAT_SF_LIFT(atan, std::atan(z), false)
+QUAT_SF_LIFT(atan, detail::sf::atan(z), false)
 QUAT_SF_LIFT(asinh, std::asinh(z), false)
 QUAT_SF_LIFT(acosh, std::acosh(z), false)
-QUAT_SF_LIFT(atanh, std::atanh(z), false)
+QUAT_SF_LIFT(atanh, detail::sf::atanh(z), false)
 
 // Elementary functions with good accuracy near zero.
 QUAT_SF_LIFT(expm1, detail::sf::expm1(z), true)

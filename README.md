@@ -17,7 +17,7 @@ auto [w, x, y, z] = p;            // structured bindings
 
 ## Requirements and build
 
-* A C++23 compiler and standard library with `<format>` (tested with GCC 14, and Clang 18/19 with libstdc++ or libc++).
+* A C++23 compiler and standard library with `<format>`. It is tested with GCC 14, and with Clang 18/19 on both libstdc++ and libc++. The comparisons against the `std::` special math functions only run where the library provides them (libstdc++).
 * CMake 3.20 or newer (optional; the library is a single header).
 
 ```bash
@@ -112,7 +112,7 @@ So `f(q)` lies in the same complex plane as `q` and commutes with it. On the `i`
 
 | Function | Notes |
 |---|---|
-| `asin acos atan asinh acosh atanh` | Use the `std::complex` kernels and branch cuts. |
+| `asin acos atan asinh acosh atanh` | Branch cuts are those of `std::complex` (C99 Annex G). `asin`, `acos`, `asinh` and `acosh` call the `std::complex` functions. `atanh` and `atan` have their own kernels: `(log1p z − log1p(−z))/2`, with `atanh(1/z) ± iπ/2` for `|z| > 1`, and `atan z = −i·atanh(iz)`. They are accurate to a few ulp on every standard library. |
 | `expm1(q)`, `log1p(q)` | Keep full relative accuracy for small `q`. |
 | `cbrt(q)` | Principal cube root (`cbrt(-8) = 1 + √3 i`), like `std::pow(z, 1/3)`. For real `x ≥ 0` it matches `std::cbrt`. |
 | `tgamma(q)` | Γ. Uses reflection `Γ(z)Γ(1−z) = π/sin πz` for `Re < ½`. Gives ±∞ at 0 and NaN at negative integers, like `<cmath>`. |
@@ -168,7 +168,7 @@ Q v = r * 1.0_i * conj(r);                              // ≈ (0,0,1,0)
 * Mixed-precision binary operators such as `quaternion<float> * quaternion<double>` are not provided, which matches `std::complex`. Convert one operand explicitly. The compound assignments do accept other precisions.
 * The standard forbids adding overloads to namespace `std`, so `std::get<I>(q)` written fully qualified does not compile. Use `quat::get`, ADL, or structured bindings.
 * The special functions use a single complex kernel per function. The `std::` special functions that need non-integer orders or several arguments (for example `cyl_bessel_j(ν, x)` with real ν, Legendre polynomials, or elliptic integrals) are not provided.
-* `std::numbers` is not used, because libc++ 19 gives only double-precision constants for `long double`. The library carries its own `long double` constants in `quat::detail`.
+* **libc++ and `long double`.** libc++ 18/19 gives only double-precision `std::numbers` constants for `long double`, and it divides `complex<long double>` values in double precision. This library therefore carries its own constants and uses its own complex division (Smith's algorithm) in every kernel. One effect remains: on libc++, `long double` `asin`, `acos`, `asinh` and `acosh` are only as accurate as libc++'s own versions, about 1e-16. They are correct to a few ulp with libstdc++.
 * The transcendental functions are not `constexpr`, because `<cmath>` is not `constexpr` until C++26. All arithmetic, `norm`, `conj`, `inverse`, `dot`, `cross` and integer `pow` are `constexpr`.
 * No special IEEE handling of infinities and NaNs (C99 Annex G style) is done beyond `proj` and `abs`.
 * In a `std::format` spec, the width applies to each component, not to the whole quaternion.

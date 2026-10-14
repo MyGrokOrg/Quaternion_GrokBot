@@ -170,9 +170,16 @@ void vs_complex(QF qf, CF cf, T a, T b, T tol) {
 template <class T> void inverse_functions() {
     using Q = quaternion<T>;
     const T tol = rtol<T>(64);
+#ifdef _LIBCPP_VERSION
+    // libc++ evaluates the complex<long double> inverse functions with double-precision
+    // division, so as a reference it is only good to about 1e-13.
+    const T ref_tol = std::is_same_v<T, long double> ? T(1e-12) : tol;
+#else
+    const T ref_tol = tol;
+#endif
     const T pts[][2] = {{T(0.25), T(0.5)}, {T(-0.75), T(1.5)}, {T(2.5), T(-0.25)}, {T(-3), T(-2)}, {T(0.5), T(10)}, {T(1e-3), T(2e-3)}};
     for (auto& p : pts) {
-#define VS(fn) vs_complex<T>([](const Q& q) { return quat::fn(q); }, [](const auto& z) { return std::fn(z); }, p[0], p[1], tol)
+#define VS(fn) vs_complex<T>([](const Q& q) { return quat::fn(q); }, [](const auto& z) { return std::fn(z); }, p[0], p[1], ref_tol)
         VS(asin); VS(acos); VS(atan); VS(asinh); VS(acosh); VS(atanh);
 #undef VS
         const Q q = on_axis(p[0], p[1]);
