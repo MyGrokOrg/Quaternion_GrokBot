@@ -30,6 +30,13 @@ if(BUILD_TESTING AND PROJECT_IS_TOP_LEVEL)
         endif()
         add_test(NAME ${t} COMMAND test_${t})
     endforeach()
+    # Evaluator for the nightly mpmath fuzz job (fuzz/fuzz.py, .github/workflows/fuzz.yml);
+    # built with the tests so that it keeps compiling on every toolchain.
+    add_executable(quaternion_fuzz_eval fuzz/fuzz_eval.cpp)
+    target_link_libraries(quaternion_fuzz_eval PRIVATE quaternion)
+    if(NOT MSVC)
+        target_compile_options(quaternion_fuzz_eval PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Werror)
+    endif()
 endif()
 
 if(QUATERNION_BUILD_EXAMPLES)

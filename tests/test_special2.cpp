@@ -1369,4 +1369,51 @@ template <class T> void bessel_near_zeros() {
 
 TEST(bessel_near_zeros_and_small_k) { FOR_EACH_TYPE(bessel_near_zeros); }
 
+namespace {
+// Regressions found by the nightly mpmath fuzz job (fuzz/fuzz.py): zeta next to s = 0
+// (zeta(1-s) with 1-s rounded), Li_s for s next to a positive integer (two 1/delta poles, and
+// the series cut short next to a trivial zero of zeta(s-k)), and W_0 for 1 < |z| <= 3 where
+// Halley's iteration converged to W_{+-1}.
+struct fzref { std::string_view fn; long double p, x, y, re, im; };
+constexpr fzref fuzz_regressions[] = {
+    {"zeta", 0x0.0p+0L, -0x1.ad7f29abcaf48p-24L, 0x0.0p+0L, -0.499999908106156711314008738166L, 0.0L},
+    {"zeta", 0x0.0p+0L, 0x1.ad7f29abcaf48p-24L, 0x0.0p+0L, -0.50000009189386335225055034788L, 0.0L},
+    {"zeta", 0x0.0p+0L, -0x1.19799812dea11p-40L, 0x0.0p+0L, -0.499999999999081061466796330455L, 0.0L},
+    {"zeta", 0x0.0p+0L, 0x1.12e0be826d695p-30L, 0x1.9c511dc3a41dfp-29L, -0.500000000918938525179246949359L, -0.00000000275681560563308755671943870201L},
+    {"zeta", 0x0.0p+0L, -0x1.999999999999ap-3L, 0x1.999999999999ap-4L, -0.343892361776230732378080200079L, -0.0607411690031452676529539152827L},
+    {"zeta", 0x0.0p+0L, 0x1.000000044b830p+0L, 0x0.0p+0L, 999999917.836851511852401825175L, 0.0L},
+    {"polylog", 0x1.00000015798eep+1L, 0x1.ccccccccccccdp-1L, 0x1.999999999999ap-2L, 1.0182747830767328428926716213L, 0.763358242559309519942240230481L},
+    {"polylog", 0x1.fffffca501acbp-1L, -0x1.999999999999ap-1L, 0x0.0p+0L, -0.587786653332562494866988872706L, 0.0L},
+    {"polylog", 0x1.800346dc5d639p+1L, -0x1.8000000000000p+1L, 0x1.0000000000000p-1L, -2.35648332271635069694096330281L, 0.322876383161382175249565127108L},
+    {"polylog", 0x1.4666666666666p+2L, -0x1.999999999999ap-1L, 0x0.0p+0L, -0.782947351295235212689557236909L, 0.0L},
+    {"polylog", 0x1.000010c6f7a0bp+0L, 0x1.0000000000000p-1L, 0x1.3333333333333p-1L, 0.247148416866708866575767316714L, 0.876057910235606827581104969927L},
+    {"polylog", 0x1.7ffcb923a29c7p+1L, 0x1.8000000000000p+0L, 0x1.8000000000000p+0L, 1.10925151784017888064546482563L, 1.9983023522009481151761786735L},
+    {"lambert_w", 0x0.0p+0L, 0x1.ef05ddd69d4acp-1L, 0x1.124991c14edffp-2L, 0.562932527975019841149784852552L, 0.0979653405915613403712939760132L},
+    {"lambert_w", 0x0.0p+0L, 0x1.0d6c185bec2d9p+0L, 0x1.ccb36c1d4896ep-4L, 0.587096929807236988841879499031L, 0.0394218462454673713759115404893L},
+    {"lambert_w", 0x0.0p+0L, -0x1.765a0cdd442e5p+0L, 0x0.0p+0L, -0.0508443625975613769498396267996L, 1.53774411359148551106456934792L},
+    {"lambert_w", 0x0.0p+0L, -0x1.6ea21727e1203p+0L, 0x1.edfd6d58c389ap-7L, -0.060564724160155532843020832246L, 1.52045824277353027718588187658L},
+    {"lambert_w", 0x0.0p+0L, -0x1.0000000000000p+0L, 0x0.0p+0L, -0.318131505204764135312654251588L, 1.33723570143068940890116214319L},
+};
+template <class T> void fuzz_regression() {
+    if constexpr (std::is_same_v<T, float>) return;  // inputs are doubles
+    const T e = std::numeric_limits<T>::epsilon();
+    double worst = 0;
+    for (const auto& r : fuzz_regressions) {
+        const quaternion<T> q(static_cast<T>(r.x), static_cast<T>(r.y), T(), T());
+        const quaternion<T> want(static_cast<T>(r.re), static_cast<T>(r.im), T(), T());
+        quaternion<T> got;
+        if (r.fn == "zeta") got = quat::riemann_zeta(q);
+        else if (r.fn == "polylog") got = quat::polylog(static_cast<T>(r.p), q);
+        else got = quat::lambert_w(q);
+        const double err = static_cast<double>(abs(got - want) / abs(want) / e);
+        worst = std::max(worst, err);
+        if (!(err <= 64)) std::fprintf(stderr, "   %.*s(%g; %g%+gi): %.3g eps\n", int(r.fn.size()), r.fn.data(), double(r.p), double(r.x), double(r.y), err);
+        qtest::check(err <= 64, r.fn.data());
+    }
+    std::printf("  [%s] fuzz regressions: worst %.3g eps\n", qtest::current_type, worst);
+}
+}  // namespace
+
+TEST(fuzz_regressions_zeta_polylog_lambert) { FOR_EACH_TYPE(fuzz_regression); }
+
 TEST_MAIN

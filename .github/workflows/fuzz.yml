@@ -1,0 +1,56 @@
+name: Nightly mpmath fuzz
+
+# Random special-function inputs checked against mpmath (fuzz/fuzz.py).  Runs nightly and on
+# demand; it is a separate workflow, so it never blocks a push or pull request.  The seed is
+# printed and written to the job summary; rerun with the same seed to reproduce.
+on:
+  schedule:
+    - cron: "17 6 * * *"   # 06:17 UTC daily
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Seed (empty = random)"
+        required: false
+        default: ""
+      samples:
+        description: "Samples per function and type"
+        required: false
+        default: "250"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - { name: gcc-14, cxx: g++-14, flags: "" }
+          - { name: clang-18-libcxx, cxx: clang++-18, flags: "-stdlib=libc++" }
+    name: fuzz (${{ matrix.compiler.name }})
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install libc++ and mpmath
+        run: |
+          if [[ "${{ matrix.compiler.flags }}" == *libc++* ]]; then
+            sudo apt-get update && sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          fi
+          python3 -m pip install --user mpmath==1.3.0
+      - name: Build evaluator
+        run: |
+          cmake -B build -DCMAKE_CXX_COMPILER=${{ matrix.compiler.cxx }} -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CXX_FLAGS=${{ matrix.compiler.flags }}" -DQUATERNION_BUILD_EXAMPLES=OFF
+          cmake --build build -j --target quaternion_fuzz_eval
+      - name: Fuzz
+        run: |
+          seed="${{ github.event.inputs.seed }}"
+          n="${{ github.event.inputs.samples }}"
+          python3 fuzz/fuzz.py --exe build/quaternion_fuzz_eval --n "${n:-250}" ${seed:+--seed "$seed"} --report fuzz-report.md
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-report-${{ matrix.compiler.name }}
+          path: fuzz-report.md

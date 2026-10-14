@@ -658,6 +658,61 @@ template <class T>
         if (s.real() < T() && std::fmod(s.real(), T(2)) == T()) return {T(), T()};  // trivial zeros
         if (s.real() == std::numeric_limits<T>::infinity()) return {T(1), T()};
     }
+    if (std::abs(s) < T(0.25)) {
+        // Taylor series about 0.  The functional equation would need zeta(1-s) with 1-s
+        // rounded, an error of eps/|s| next to the pole (2.6e6 ulp at s = -1e-7 in double).
+        static constexpr long double c[] = {
+        -0.5L,
+        -0.91893853320467274178032973640561764L,
+        -1.00317822795429242560505001336498022L,
+        -1.00078519447704240796017680222772921L,
+        -0.999879299500571164957800813655875236L,
+        -1.00000194089632045603779988198163183L,
+        -1.00000130114601395962431150487297972L,
+        -0.999999831384173610779930217058015407L,
+        -1.00000000576467597994939441606374166L,
+        -1.00000000091101648923141657092186742L,
+        -0.999999999850299240580988626479279943L,
+        -1.00000000000940689566566617690964784L,
+        -1.00000000000004092582630415831547637L,
+        -0.999999999999934600951941089847743544L,
+        -1.00000000000000654396874989191937317L,
+        -0.999999999999999698757512863321320505L,
+        -0.999999999999999996011105293688944503L,
+        -1.00000000000000000185821504337850325L,
+        -0.99999999999999999983971143614707759L,
+        -1.00000000000000000000711558273921601L,
+        -0.999999999999999999999992069688084904L,
+        -0.999999999999999999999973441357813012L,
+        -1.00000000000000000000000239515544094L,
+        -0.999999999999999999999999881967211608L,
+        -1.00000000000000000000000000229558469L,
+        -1.00000000000000000000000000017456982L,
+        -0.999999999999999999999999999978668328L,
+        -1.00000000000000000000000000000124496L,
+        -0.999999999999999999999999999999958088L,
+        -1.00000000000000000000000000000000007L,
+        -1.0000000000000000000000000000000001L,
+        -0.999999999999999999999999999999999992L,
+        -1.0L,
+        -1.0L,
+        -1.0L,
+        -1.0L,
+        -1.0L,
+        -1.0L,
+        -1.0L,
+        -1.0L,
+        -1.0L
+};
+        cplx<T> r{}, pw(T(1));
+        for (const long double ck : c) {
+            const cplx<T> t = static_cast<T>(ck) * pw;
+            r += t;
+            if (std::abs(t) <= eps<T>() / T(8) * std::abs(r)) break;
+            pw *= s;
+        }
+        return r;
+    }
     if (s.real() < T(0.5)) {
         // zeta(s) = 2^s pi^(s-1) sin(pi s/2) Gamma(1-s) zeta(1-s), in log form to avoid overflow.
         // The exponent is formed in double-T and sin(pi s/2) in split form, so neither
@@ -1890,7 +1945,14 @@ template <class T>
 [[nodiscard]] inline cplx<T> polylog_logseries(T s, const cplx<T>& z) {
     const cplx<T> mu = std::log(z);
     const bool pos_int = is_integer(s) && s >= T(1);
-    const long n = pos_int ? static_cast<long>(s) : 0;
+    // s = n + delta next to a positive integer n: the k = n-1 term zeta(1+delta) mu^{n-1}/(n-1)!
+    // and Gamma(1-s)(-mu)^{s-1} both have a 1/delta pole.  They are combined analytically:
+    //   mu^{n-1}/(n-1)! [A(delta) - expm1(E)/delta],  A = zeta(1+delta) - 1/delta (Stieltjes),
+    //   E = delta log(-mu) + log(pi delta/sin(pi delta)) + log Gamma(n) - log Gamma(n+delta),
+    // with E/delta from its Taylor series, so nothing cancels.
+    const T sr = std::nearbyint(s), delta = s - sr;
+    const bool near_int = !pos_int && sr >= T(1) && std::abs(delta) <= T(0.1);
+    const long n = pos_int ? static_cast<long>(s) : near_int ? static_cast<long>(sr) : 0;
     cplx<T> sum{}, p(T(1));
     T fact = T(1);
     for (long k = 0; k < 2000; ++k) {
@@ -1898,13 +1960,29 @@ template <class T>
             p *= mu;
             fact *= T(k);
         }
-        if (pos_int && k == n - 1) continue;
+        if ((pos_int || near_int) && k == n - 1) continue;
         const T sk = s - T(k);
         if (sk < T() && is_integer(sk) && static_cast<long>(sk) % 2 == 0) continue;  // trivial zeros
-        const T zk = riemann_zeta(cplx<T>(sk)).real();
+        // Next to a trivial zero -2m, zeta(sk) ~ eta zeta'(-2m) with eta = sk + 2m; the rounding
+        // of s - k (ulp(k), far above eta for s just off an integer) must not enter eta.  So
+        // zeta(sk) = (-1)^m sin(pi eta/2) 2^sk pi^(sk-1) Gamma(1-sk) zeta(1-sk), eta exact.
+        const T sh = sk / T(2) - std::nearbyint(sk / T(2));
+        const bool near_trivial = sk < T(-1) && std::abs(sh) < T(0.05);
+        T zk;
+        if (near_trivial) {
+            const T m = -std::nearbyint(sk / T(2));
+            const T eta = ((sr - T(k)) + T(2) * m) + (s - sr);  // exact
+            const T mag = std::exp(sk * std::log(T(2)) + (sk - T(1)) * std::log(pi<T>) + std::lgamma(T(1) - sk)) *
+                          riemann_zeta(cplx<T>(T(1) - sk)).real();
+            zk = (std::fmod(m, T(2)) == T() ? T(1) : T(-1)) * sinpi(eta / T(2)) * mag;
+        } else {
+            zk = riemann_zeta(cplx<T>(sk)).real();
+        }
         const cplx<T> t = zk * p / fact;
         sum += t;
-        if (k > 4 && std::abs(t) <= eps<T>() * std::abs(sum) / 8) break;
+        // A term next to a trivial zero (s - k near -2, -4, ...) is small without the series
+        // having converged: do not stop there (this cut Li_s short for s near an integer).
+        if (k > 4 && !near_trivial && std::abs(t) <= eps<T>() * std::abs(sum) / 8) break;
     }
     if (pos_int) {
         T H = T();
@@ -1912,6 +1990,82 @@ template <class T>
         T f = T(1);
         for (long i = 2; i < n; ++i) f *= T(i);
         return sum + ipow(mu, static_cast<unsigned>(n - 1)) / f * (H - std::log(-mu));
+    }
+    if (near_int) {
+        static constexpr long double stieltjes_a[] = {  // (-1)^k gamma_k / k!
+        0.577215664901532860606512090082402431L,
+        0.0728158454836767248605863758749013191L,
+        -0.00484518159643615924226519301760626468L,
+        -0.000342305736717224311026674423792230714L,
+        0.0000968904193944708357278404240635861667L,
+        -0.00000661103181084218918127779064537037359L,
+        -0.000000331624090875277235933919224872228164L,
+        0.000000104620945844791874221051092356916326L,
+        -0.00000000873321810027379736116200806054585173L,
+        0.00000000009478277782762358955554074018470952L,
+        0.0000000000565842192760870796637241758259108529L,
+        -6.7686898635136966558667549018948331e-12L,
+        3.49211593667203185445521566819783998e-13L,
+        4.41042474175775338023724020535713989e-15L,
+        -2.39978622177099917550505620996371351e-15L,
+        2.16773122007268285496389323582067013e-16L,
+        -9.54446607636696517342499076972236294e-18L,
+        -7.3876766605386364978155782870704015e-20L,
+        4.80085078248806522761766273828542567e-20L,
+        -4.13995673771330564126948200778884778e-21L,
+        1.91682015939912339496481976180313116e-22L,
+        -2.0441543122262166077275863759982535e-24L,
+        -4.81849850110735344392921837431093251e-25L,
+        4.81185705151256647946110663519045342e-26L,
+        -2.56026331031881493660912995816108722e-27L,
+        6.9278408953046671238801264492378066e-29L,
+        1.62860755048558674407104276822745755e-30L,
+        -3.19393756115325557604210739567211501e-31L,
+        2.09915158936342552768548584185771825e-32L,
+        -8.33674529544144047562508226550865547e-34L
+};
+        T A{}, dk = T(1);
+        for (const long double a : stieltjes_a) {
+            A += static_cast<T>(a) * dk;
+            dk *= delta;
+        }
+        // E/delta = log(-mu) - psi(n) + sum_{k>=1} zeta(2k) delta^{2k-1}/k
+        //           - sum_{j>=2} (-1)^j (zeta(j) - H^{(j)}_{n-1}) delta^{j-1}/j
+        T psi = -static_cast<T>(stieltjes_a[0]);
+        for (long i = 1; i < n; ++i) psi += T(1) / T(i);
+        T ser{}, dj = T(1);  // dj = delta^{j-1}
+        for (int j = 2; j < 60; ++j) {
+            dj *= delta;
+            const T zj = riemann_zeta(cplx<T>(T(j))).real();
+            T Hj{};
+            for (long i = 1; i < n; ++i) Hj += std::pow(T(i), -T(j));
+            T t = -((j % 2 == 0) ? T(1) : T(-1)) * (zj - Hj) / T(j);
+            if (j % 2 == 0) t += zj / T(j / 2);  // zeta(2k)/k, k = j/2
+            t *= dj;
+            ser += t;
+            if (std::abs(dj) * T(2) <= eps<T>() / T(16)) break;  // coefficients are below 2
+        }
+        const cplx<T> Ed = std::log(-mu) - psi + ser;
+        const cplx<T> E = delta * Ed;
+        // expm1(E)/E, accurate for small E
+        cplx<T> q;
+        if (std::abs(E) < T(1e-3)) {
+            cplx<T> term(T(1)), acc(T(1));
+            for (int i = 2; i < 30; ++i) {
+                term *= E / T(i);
+                acc += term;
+                if (std::abs(term) <= eps<T>() / T(8)) break;
+            }
+            q = acc;
+        } else {
+            const T c = std::cos(E.imag());
+            const cplx<T> em1(std::expm1(E.real()) * c - T(2) * std::pow(std::sin(E.imag() / T(2)), 2),
+                              std::exp(E.real()) * std::sin(E.imag()));
+            q = cdiv(em1, E);
+        }
+        T f = T(1);
+        for (long i = 2; i < n; ++i) f *= T(i);
+        return sum + ipow(mu, static_cast<unsigned>(n - 1)) / f * (A - Ed * q);
     }
     return sum + std::exp(lgamma(cplx<T>(T(1) - s))) * std::exp((s - T(1)) * std::log(-mu));
 }
@@ -2005,9 +2159,13 @@ template <class T>
         w = bp_series(-p);
     } else if (near_bp && k == 1 && on_lower_side(z)) {
         w = bp_series(-p);
-    } else if (k == 0 && std::abs(z) <= T(1)) {
+    } else if (k == 0 && std::abs(z) <= T(0.3)) {
         w = z * (T(1) - z + T(1.5) * z * z);  // series start
-        if (std::abs(z) > T(0.3)) w = std::log(T(1) + z);
+    } else if (k == 0 && std::abs(z) <= T(3)) {
+        // log(1 + z), or the branch-point series with the principal root near z = -1.  (The
+        // asymptotic start log z - log log z used to be taken for 1 < |z| <= 3, where log z is
+        // small and Halley's iteration could converge to W_{+-1}, e.g. at z = 0.97 + 0.27i.)
+        w = std::abs(T(1) + z) < T(0.5) ? bp_series(p) : std::log(T(1) + z);
     } else {
         cplx<T> L1 = std::log(z);
         L1 += cplx<T>(T(), T(2) * pi<T> * T(k));
@@ -2016,20 +2174,43 @@ template <class T>
         w = (std::abs(L1) > T(0)) ? L1 - L2 + cdiv(L2, L1) : L1;
         if (real_axis && k == -1 && z.real() < T() && z.real() > -e1) w = L1;  // real start
     }
-    for (int it = 0; it < 200; ++it) {
-        cplx<T> dw;
-        if (std::abs(w) > T(30) && std::abs(z) > T(1e6)) {
-            // Newton on w + log w = log z + 2 pi i k (avoids overflow of w e^w).
-            const cplx<T> g = w + std::log(w) - std::log(z) - cplx<T>(T(), T(2) * pi<T> * T(k));
-            dw = cdiv(g, T(1) + cdiv(T(1), w));
-        } else {
-            const cplx<T> ew = std::exp(w), f = w * ew - z, w1 = w + T(1);
-            const cplx<T> den = ew * w1 - cdiv((w + T(2)) * f, T(2) * w1);
-            dw = cdiv(f, den);
+    auto halley = [&](cplx<T> x) {
+        for (int it = 0; it < 200; ++it) {
+            cplx<T> dw;
+            if (std::abs(x) > T(30) && std::abs(z) > T(1e6)) {
+                // Newton on w + log w = log z + 2 pi i k (avoids overflow of w e^w).
+                const cplx<T> g = x + std::log(x) - std::log(z) - cplx<T>(T(), T(2) * pi<T> * T(k));
+                dw = cdiv(g, T(1) + cdiv(T(1), x));
+            } else {
+                const cplx<T> ew = std::exp(x), f = x * ew - z, w1 = x + T(1);
+                const cplx<T> den = ew * w1 - cdiv((x + T(2)) * f, T(2) * w1);
+                dw = cdiv(f, den);
+            }
+            if (!is_finite(dw)) break;  // at the branch point w = -1 exactly
+            x -= dw;
+            if (!(std::abs(dw) > T(4) * eps<T>() * std::abs(x))) break;
         }
-        if (!is_finite(dw)) break;  // at the branch point w = -1 exactly
-        w -= dw;
-        if (!(std::abs(dw) > T(4) * eps<T>() * std::abs(w))) break;
+        return x;
+    };
+    // W_0 takes values left-bounded by the curve -eta cot(eta) + i eta, |eta| < pi.
+    auto in_w0 = [](const cplx<T>& v) {
+        const T eta = v.imag();
+        if (!(std::abs(eta) < pi<T>)) return false;
+        if (eta == T()) return v.real() >= T(-1) - T(1e-6);
+        return v.real() > -eta / std::tan(eta) - T(1e-6) * (T(1) + std::abs(v.real()));
+    };
+    w = halley(w);
+    if (k == 0 && !near_bp && !in_w0(w)) {
+        // The start led Halley's iteration to another branch: retry from other starts.
+        const cplx<T> lz = std::log(T(1) + z);
+        const cplx<T> starts[] = {bp_series(p), lz * (T(1) - cdiv(std::log(T(1) + lz), T(2) + lz)), lz, cplx<T>(T(0.5))};
+        for (const auto& s0 : starts) {
+            const cplx<T> v = halley(s0);
+            if (in_w0(v)) {
+                w = v;
+                break;
+            }
+        }
     }
     // Near the branch point w e^w - z cancels badly.  Refine d = w + 1 by Newton on the
     // well-conditioned residual  e^{-1} g(d) - (z + 1/e),  g(d) = (d-1) e^d + 1.

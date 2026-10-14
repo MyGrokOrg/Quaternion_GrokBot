@@ -2,6 +2,22 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## Nightly mpmath fuzz job; fixes for ζ near 0, Li_s near integer s, and W₀
+
+* **Fuzz job.** `.github/workflows/fuzz.yml` runs nightly (cron 06:17 UTC) and on `workflow_dispatch` (optional `seed`, `samples`). It is a separate, non-gating workflow, with GCC 14/libstdc++ and Clang 18/libc++.
+  * `fuzz/fuzz.py` samples 22 special functions over several regions: real-axis points, |z| from 10⁻¹² to 400, Bessel orders from −5.5 to 100, ζ near 0 and 1, and Li_s near integer s. Points go on random ±i/±j/±k axes.
+  * The evaluator `fuzz/fuzz_eval.cpp` computes the values, and the script compares them with mpmath against per-function bounds. The seed is logged, and the report goes to the job summary and to the `fuzz-report-*` artifact.
+  * `quaternion_fuzz_eval` is built with the tests, so the evaluator stays compiling on every CI toolchain.
+* **Bugs it found** (before → after; worst error in ε over 400 fuzz samples, seed 11, double / long double):
+  * **`riemann_zeta` next to s = 0** (|s| ≲ 10⁻³): the functional equation used ζ(1 − s) with 1 − s rounded, so the error was ε/|s|. Examples: 2.6e6 ulp at s = −10⁻⁷, and 4e11 ulp at s = −10⁻¹². It now uses the Taylor series about 0 for |s| < 0.25. Fuzz: 1.8e11 / 1.4e11 → 11.8 / 9.3.
+  * **`polylog(s, z)` for non-integer s next to a positive integer n:**
+    * The k = n−1 term ζ(1+δ)μⁿ⁻¹/(n−1)! and Γ(1−s)(−μ)^{s−1} both have 1/δ poles. They are now combined analytically (Stieltjes constants and a series for log(πδ/sin πδ) + log Γ(n) − log Γ(n+δ)).
+    * The log-series stopped early at a term next to a trivial zero of ζ(s−k). ζ there now comes from the reflection formula with the exact offset from −2m.
+    * Fuzz: 3.5e13 / 7.1e16 → 100 / 109. At s = 3.00000001, z = −0.8: 6.9e13 / 1.2e15 → < 64.
+  * **`lambert_w` (branch 0) for 1 < |z| ≤ 3:** the start log z − log log z could send Halley's iteration to W₋₁ or W₁ (e.g. z = 0.9668 + 0.2678i gave −1.59 + 4.65i). On a grid over 1 < |z| ≤ 6, 94 of 32,800 points were affected. It now starts from log(1+z), or from the branch-point series near z = −1, and checks that the result lies in the range of W₀, retrying from other starts if it does not. Fuzz: 3.6e16 / 7.5e19 → 1.0 / 1.1. Grid: 94 → 0 wrong.
+* **Not library bugs:** the fuzz also flagged sph_bessel/sph_neumann on the negative real axis, and K/J results that under- or overflow `double`. The first was a reference issue: mpmath's √(π/2z)·J_{n+½} takes the cut, while j_n and y_n are single-valued. The script now uses the parity relations there and skips results outside the normal range of the type.
+* **Tests:** `fuzz_regressions_zeta_polylog_lambert` (17 mpmath references).
+
 ## Faster Bessel functions at small |z|; relative accuracy next to the zeros of J
 
 * **J_ν, I_ν, j_n and integer-order J_n at |z| ≤ 16** now use the ascending series. The sum S = Σ(∓z²/4)ᵏ/(k!(ν+1)ₖ) is carried in double-length arithmetic, which absorbs its cancellation of up to e^|z|. The prefactor (z/2)^ν/Γ(ν+1) is formed as a double-length integer power times (z/2)^frac(ν). For large order, it is built as exp(ν log(z/2) − log Γ(ν+1)) with a double-length exponent. Negative non-integer ν uses the series directly, and negative integers use J₋ₙ = (−1)ⁿJₙ and I₋ₙ = Iₙ. These functions used to go through K (the double-exponential Laplace integral) and the J/I continued fraction, or, for integer n, Miller's recurrence, which is only absolutely accurate.
