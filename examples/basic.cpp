@@ -30,11 +30,11 @@ int main() {
     std::println("zeta(p)   = {:.6g}", quat::riemann_zeta(p));
     std::println("J_2(p)    = {:.6g}", quat::cyl_bessel_j(2, p));
     std::println("sin(asin(p)) = {:.6f}", sin(quat::asin(p)));
-
-    auto [w, x, y, z] = p;  // structured bindings
-    std::println("components sum = {}", w + x + y + z);
-}
     std::println("J_0.5(p)  = {:.6g}", quat::cyl_bessel_j(0.5, p));
     std::println("Ai(p)     = {:.6g}", quat::airy_ai(p));
     std::println("Li_2(p)   = {:.6g}", quat::polylog(2, p));
     std::println("W_0(p)    = {:.6g}", quat::lambert_w(p));
+
+    auto [w, x, y, z] = p;  // structured bindings
+    std::println("components sum = {}", w + x + y + z);
+}
