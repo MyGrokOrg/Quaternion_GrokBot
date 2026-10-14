@@ -18,9 +18,12 @@ import argparse, math, os, random, subprocess, sys, time
 import mpmath as mp
 
 EPS = {"double": 2.0 ** -52, "long double": 2.0 ** -63}
-# Results must lie well inside the normal range of the type to be compared.
-RANGE = {"double": (mp.mpf(2) ** (-1022 + 64), mp.mpf(2) ** 1021),
-         "long double": (mp.mpf(2) ** (-16382 + 64), mp.mpf(2) ** 16381)}
+# Results must lie well inside the normal range of the type to be compared.  The upper
+# limit leaves 2^12 of headroom: the Bessel kernels form intermediates (H_{nu+1}, K_{nu+1},
+# products with e^{i nu pi/2}) up to ~|2 nu / z| larger than the result, so results within a
+# few thousand times the largest finite value may overflow (a documented limit).
+RANGE = {"double": (mp.mpf(2) ** (-1022 + 64), mp.mpf(2) ** 1012),
+         "long double": (mp.mpf(2) ** (-16382 + 64), mp.mpf(2) ** 16372)}
 
 # Bounds in eps, from README.md (accuracy tables) with headroom; (bound, note).
 BOUNDS = {
@@ -29,7 +32,7 @@ BOUNDS = {
     "polylog": 512, "lambert_w": 16, "expint": 64, "expint_n": 64, "tgamma_upper": 128,
     "cyl_bessel_j": 64, "cyl_bessel_j_int": 64, "cyl_neumann": 64, "cyl_bessel_i": 64,
     "cyl_bessel_k": 64, "cyl_hankel_1": 64, "sph_bessel": 64, "sph_neumann": 64,
-    "airy_ai": 64, "airy_bi": 64,
+    "airy_ai": 128, "airy_bi": 128,  # condition ~ |z|^(3/2) up to |z| = 20
 }
 LARGE_ORDER_BOUND = 2048  # README: up to about 650 ulp for 20 <= nu <= 250
 
