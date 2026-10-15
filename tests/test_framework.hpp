@@ -9,6 +9,17 @@
 #include <vector>
 #include <quaternion/quaternion.hpp>
 
+// Builds whose compiler may contract a * b + c into an fma: GCC/Clang with FMA enabled
+// (__FMA__, e.g. -march=haswell or clang-cl /arch:AVX2), MSVC with /fp:contract or /fp:fast
+// (_M_FP_CONTRACT, _M_FP_FAST), and Clang on ARM64, where FMA is baseline and contraction
+// is on by default.  Bit-exact runtime checks are skipped there.
+#if defined(__FMA__) || defined(_M_FP_CONTRACT) || defined(_M_FP_FAST) || \
+    (defined(__clang__) && (defined(__aarch64__) || defined(_M_ARM64)))
+#define QTEST_FP_CONTRACT 1
+#else
+#define QTEST_FP_CONTRACT 0
+#endif
+
 namespace qtest {
 inline int failures = 0, checks = 0;
 inline const char* current_type = "";

@@ -105,7 +105,7 @@ template <class T> void constexpr_vs_runtime() {
         abs_diff += !same(ra, t.ab[i]);
         abs_far += !(ra == t.ab[i] || std::nextafter(ra, t.ab[i]) == t.ab[i]);
     }
-#if defined(__FMA__)
+#if QTEST_FP_CONTRACT
     // The runtime Hamilton product may be contracted into FMAs; constant evaluation never is.
     (void)div_diff;
 #else

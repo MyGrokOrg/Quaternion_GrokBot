@@ -31,7 +31,9 @@ if(BUILD_TESTING AND PROJECT_IS_TOP_LEVEL)
         add_test(NAME ${t} COMMAND test_${t})
     endforeach()
     # The constexpr helpers' error-free transformations are also run at run time in this test.
-    if(NOT MSVC)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        target_compile_options(test_constexpr PRIVATE /clang:-ffp-contract=off)  # clang-cl
+    elseif(NOT MSVC)
         target_compile_options(test_constexpr PRIVATE -ffp-contract=off)
     endif()
     target_include_directories(test_bitident PRIVATE tests)

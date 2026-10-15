@@ -45,7 +45,7 @@ void check(const char* tname) {
     }
 }
 TEST(runtime_bit_identity) {
-#if defined(__FMA__)
+#if QTEST_FP_CONTRACT
     std::printf("  FMA build: golden hashes skipped (see the bit-identity CI job)\n");
     return;
 #endif

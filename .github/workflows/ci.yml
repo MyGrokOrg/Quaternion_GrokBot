@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, win-wide]
   pull_request:
 
 jobs:
@@ -42,10 +42,11 @@ jobs:
         run: cmake --install build --prefix ${{ runner.temp }}/install
 
   windows:
-    # MSVC (latest toolset on windows-latest, /std:c++latest via CMAKE_CXX_STANDARD 23)
-    # and clang-cl with the MSVC STL, through the default (newest) Visual Studio generator.
-    # long double is double on this platform.
-    runs-on: windows-latest
+    # MSVC (latest toolset) and clang-cl with the MSVC STL, through the default (newest)
+    # Visual Studio generator; /std:c++latest via CMAKE_CXX_STANDARD 23.  long double is
+    # double on this platform.  x64 on windows-latest, plain and /arch:AVX2 (with FMA
+    # contraction: /fp:contract for MSVC, clang-cl's default); ARM64 on windows-11-arm.
+    runs-on: ${{ matrix.runner || 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -53,19 +54,76 @@ jobs:
           - { name: msvc, toolset: "", build_type: Debug }
           - { name: msvc, toolset: "", build_type: Release }
           - { name: clang-cl, toolset: "-T ClangCL", build_type: Release }
+          - { name: msvc /arch:AVX2, toolset: "", build_type: Release, cxxflags: "/arch:AVX2", avx2: true }
+          - { name: msvc /arch:AVX2 /fp:contract, toolset: "", build_type: Release, cxxflags: "/arch:AVX2 /fp:contract", avx2: true }
+          - { name: clang-cl /arch:AVX2, toolset: "-T ClangCL", build_type: Release, cxxflags: "/arch:AVX2", avx2: true }
+          - { name: msvc ARM64, toolset: "", build_type: Debug, arch: ARM64, runner: windows-11-arm }
+          - { name: msvc ARM64, toolset: "", build_type: Release, arch: ARM64, runner: windows-11-arm }
+          - { name: clang-cl ARM64, toolset: "-T ClangCL", build_type: Release, arch: ARM64, runner: windows-11-arm }
     name: ${{ matrix.name }} (${{ matrix.build_type }})
+    env:
+      CXXFLAGS: ${{ matrix.cxxflags }}
     steps:
       - uses: actions/checkout@v5
+      - name: CPU
+        run: |
+          (Get-CimInstance Win32_Processor).Name
+          $env:PROCESSOR_ARCHITECTURE
+      - name: Check the CPU has AVX2 and FMA
+        if: matrix.avx2
+        run: |
+          Add-Type -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool IsProcessorFeaturePresent(uint f);' -Name K -Namespace W
+          # PF_AVX2_INSTRUCTIONS_AVAILABLE = 40; FMA3 ships with AVX2 on every x64 CPU that has it
+          if (-not [W.K]::IsProcessorFeaturePresent(40)) { throw "no AVX2" }
       - name: Configure
         run: |
-          cmake -B build -A x64 ${{ matrix.toolset }}
-          Select-String -Path build/test_core.vcxproj -Pattern '<LanguageStandard>' | Select-Object -First 1
+          cmake -B build -A ${{ matrix.arch || 'x64' }} ${{ matrix.toolset }}
+          Select-String -Path build/test_core.vcxproj -Pattern '<LanguageStandard>|<EnableEnhancedInstructionSet>|<FloatingPointModel>|<AdditionalOptions>' | Select-Object -First 4
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} -j
       - name: Test
         run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure
       - name: Install
         run: cmake --install build --config ${{ matrix.build_type }} --prefix ${{ runner.temp }}/install
+
+  bitident-windows:
+    # The bit-identity checks of the Linux haswell job, on Windows: tests/bitident/windows.py
+    # builds tests/bitident/dump.cpp with MSVC and clang-cl, plain, /arch:AVX2 and with FMA
+    # contraction, against this header and the pre-constexpr one, and compares the bits
+    # (old vs new, vs the Linux golden hashes, and across the builds).
+    name: bit-identity (windows ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, runner: windows-latest, llvm: x64 }
+          - { arch: arm64, runner: windows-11-arm, llvm: ARM64 }
+    env:
+      BASELINE: 91cad1a
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Baseline headers
+        shell: bash
+        run: |
+          mkdir -p old/quaternion
+          git show $BASELINE:include/quaternion.hpp > old/quaternion.hpp
+          git show $BASELINE:include/quaternion/quaternion.hpp > old/quaternion/quaternion.hpp
+          git show $BASELINE:include/quaternion/special_functions.hpp > old/quaternion/special_functions.hpp
+      - name: Compare
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=${{ matrix.arch }} -host_arch=${{ matrix.arch }}'
+          cl 2>&1 | Select-Object -First 1
+          $clangcl = "$vs\VC\Tools\Llvm\${{ matrix.llvm }}\bin\clang-cl.exe"
+          if (Test-Path $clangcl) { & $clangcl --version | Select-Object -First 1 }
+          python tests/bitident/windows.py --arch ${{ matrix.arch }} --clang-cl "$clangcl" --report bitident.md
+          $code = $LASTEXITCODE
+          Get-Content bitident.md | Add-Content $env:GITHUB_STEP_SUMMARY
+          exit $code
 
   sanitizers:
     runs-on: ubuntu-24.04
