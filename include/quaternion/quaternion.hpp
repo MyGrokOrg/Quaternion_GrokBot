@@ -685,11 +685,63 @@ template <class T>
 }
 
 namespace detail {
+#if defined(_WIN32)
+// sqrt(x^2 + y^2 + z^2) to within about 0.5 ulp, exact when the true value is representable.
+// Used instead of the nested std::hypot on Windows: the Universal CRT's hypot is not
+// correctly rounded (1 ulp off in 32576 of 200000 double inputs in test_constexpr), and
+// every function of a quaternion with |Im| = |v| large inherits |v| times that error (e.g.
+// sinh at |v| = 109: 63.8 eps).  glibc's and libc++'s builds keep std::hypot, unchanged.
+template <class T>
+[[nodiscard]] inline T vnorm3(T x, T y, T z) noexcept {
+    using L = std::numeric_limits<T>;
+    x = std::abs(x); y = std::abs(y); z = std::abs(z);
+    const T m = (std::max)((std::max)(x, y), z);
+    if (!(m > T()) || !(m <= L::max()) || std::isnan(x) || std::isnan(y) || std::isnan(z))
+        return std::hypot(std::hypot(x, y), z);  // zero, infinities and NaNs as before
+    if constexpr (L::digits < 53 && std::numeric_limits<double>::digits == 53 && L::max_exponent <= 128) {
+        // float: squares exact in double, sum rounded once, then sqrt and the final rounding.
+        const double dx = x, dy = y, dz = z;
+        return static_cast<T>(std::sqrt(dx * dx + dy * dy + dz * dz));
+    } else {
+        // Scale by 2^-e so that m is in [1, 2): no overflow, and squares of components below
+        // m 2^-(digits+2) only matter beyond the last bit.
+        const int e = std::ilogb(m);
+        x = std::scalbn(x, -e); y = std::scalbn(y, -e); z = std::scalbn(z, -e);
+        // Exact squares (Dekker), their sum in double-length, one Newton correction.
+        const auto sq = [](T a, T& p, T& err) {
+            constexpr T split = T((std::uint64_t(1) << ((L::digits + 1) / 2)) + 1);
+            p = a * a;
+            const T c = split * a, ah = c - (c - a), al = a - ah;
+            err = ((ah * ah - p) + T(2) * ah * al) + al * al;
+        };
+        const auto two_sum = [](T a, T b, T& s2, T& err) {
+            s2 = a + b;
+            const T bb = s2 - a;
+            err = (a - (s2 - bb)) + (b - bb);
+        };
+        T px, ex, py, ey, pz, ez, s1, e1, s2, e2;
+        sq(x, px, ex); sq(y, py, ey); sq(z, pz, ez);
+        two_sum(px, py, s1, e1);
+        two_sum(s1, pz, s2, e2);
+        const T lo = ((ex + ey) + ez) + (e1 + e2);
+        const T h = std::sqrt(s2);
+        // residual s - h^2, exactly: h^2 = hp + he
+        T hp, he;
+        sq(h, hp, he);
+        const T r = ((s2 - hp) - he + lo) / (T(2) * h);
+        return std::scalbn(h + r, e);
+    }
+}
+#endif
 template <class T>
 [[nodiscard]] inline T vabs(const quaternion<T>& q) noexcept {
+#if defined(_WIN32)
+    return vnorm3(q.x(), q.y(), q.z());
+#else
     // Nested two-argument hypot: libc++ 18's three-argument std::hypot squares its
     // arguments without scaling and overflows/underflows (e.g. for float beyond 2^64).
     return std::hypot(std::hypot(q.x(), q.y()), q.z());
+#endif
 }
 // Rebuild s + u*v where u is the unit vector of q (i if q has no vector part).
 template <class T>
