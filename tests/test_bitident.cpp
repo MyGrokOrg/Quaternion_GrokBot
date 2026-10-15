@@ -11,13 +11,13 @@
 #include <string>
 
 struct golden { const char* type; const char* op; std::uint64_t hash; };
-static const golden G[] = {
+[[maybe_unused]] static const golden G[] = {
 #include "bitident/golden.inc"
 };
 
 // abs and normalize call the C library's hypot.  The goldens are glibc's; the Universal CRT
 // (MSVC, clang-cl) rounds hypot differently, so Windows has its own hashes for those two
-// ("<type>@ucrt" entries in golden.inc).
+// ("<type>@ucrt" entries in golden.inc; "<type>@ucrt-arm64" on ARM64).
 [[maybe_unused]] static bool uses_libm_hypot(const std::string& op) { return op == "abs" || op == "normalize"; }
 
 template <class T>
@@ -29,9 +29,15 @@ void check(const char* tname) {
         std::string type = tname;
 #if defined(_WIN32)
         // (float abs/normalize match glibc's hashes, so only double has @ucrt entries.)
+        // The ARM64 build of the Universal CRT rounds hypot differently again ("@ucrt-arm64").
+#if defined(_M_ARM64)
+        const char* crt = "@ucrt-arm64";
+#else
+        const char* crt = "@ucrt";
+#endif
         if (uses_libm_hypot(name))
             for (const auto& g : G)
-                if (type + "@ucrt" == g.type && name == g.op) { type += "@ucrt"; break; }
+                if (type + crt == g.type && name == g.op) { type += crt; break; }
 #endif
         for (const auto& g : G) {
             if (type != g.type || name != g.op) continue;
@@ -46,11 +52,11 @@ void check(const char* tname) {
 }
 TEST(runtime_bit_identity) {
 #if QTEST_FP_CONTRACT
-    std::printf("  FMA build: golden hashes skipped (see the bit-identity CI job)\n");
-    return;
-#endif
+    std::printf("  FMA build: golden hashes skipped (see the bit-identity CI jobs)\n");
+#else
     check<float>("float");
     check<double>("double");
     check<long double>("long_double");
+#endif
 }
 TEST_MAIN

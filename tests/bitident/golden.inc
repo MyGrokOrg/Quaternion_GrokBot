@@ -48,3 +48,6 @@
 // Universal CRT hypot (MSVC and clang-cl on x64 Windows); see test_bitident.cpp.
 {"double@ucrt", "abs", 0xb070269c7907da60ULL},
 {"double@ucrt", "normalize", 0x1fb842d499f657f4ULL},
+// Universal CRT hypot on ARM64 Windows (MSVC and clang-cl; differs from both of the above).
+{"double@ucrt-arm64", "abs", 0x2d7f00354389fa6aULL},
+{"double@ucrt-arm64", "normalize", 0x64940283057f2787ULL},
