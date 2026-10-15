@@ -18,6 +18,7 @@ LLVM clang with its own libc++.  Exit status 1 on any failure; Markdown summary 
 import argparse, os, platform, re, subprocess, sys
 
 COMMON = ["-std=c++23", "-O2"]
+DIV_OPS = {"div", "scalar_div_q", "complex", "compound"}
 
 def builds(arch, apple, llvm):
     # (name, compiler, extra flags, library code contracted?, must equal this build)
@@ -95,7 +96,13 @@ def main():
         else:
             diff = sorted(k for k in new_raw if old_raw.get(k) != new_raw[k])
             ovn = "identical" if not diff else "DIFFER: " + ", ".join("%s %s" % k for k in diff)
-            if diff: fails.append("%s: old vs new differ: %s" % (name, diff))
+            # x86_64: the pre-constexpr header called the C library's scalbn in division,
+            # which rounds subnormal results wrongly on macOS x86_64; the current header
+            # uses its exact scalbn there.  Listed, not failed, for the division ops.
+            if diff and arch == "x86_64" and all(op in DIV_OPS for _, op in diff):
+                ovn = "differ as expected (old header: libm scalbn): " + ", ".join("%s %s" % k for k in diff)
+            elif diff:
+                fails.append("%s: old vs new differ: %s" % (name, diff))
         if contracts:
             vg = "skipped (contracting build)"
         else:
