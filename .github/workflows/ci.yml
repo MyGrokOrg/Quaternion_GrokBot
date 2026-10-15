@@ -177,6 +177,42 @@ jobs:
       - name: Install
         run: cmake --install build --prefix ${{ runner.temp }}/install
 
+  bitident-macos:
+    # The bit-identity checks of the Linux haswell job, on macOS: tests/bitident/macos.py builds
+    # tests/bitident/dump.cpp with Apple Clang and Homebrew LLVM clang (plain, and with and
+    # without FMA contraction) against this header and the pre-constexpr one, and compares the
+    # bits (old vs new, vs the Linux golden hashes, and across the builds).
+    name: bit-identity (macos ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, runner: macos-latest }
+          - { arch: x86_64, runner: macos-15-intel }
+    env:
+      BASELINE: 91cad1a
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Baseline headers
+        run: |
+          mkdir -p old/quaternion
+          git show $BASELINE:include/quaternion.hpp > old/quaternion.hpp
+          git show $BASELINE:include/quaternion/quaternion.hpp > old/quaternion/quaternion.hpp
+          git show $BASELINE:include/quaternion/special_functions.hpp > old/quaternion/special_functions.hpp
+      - name: Compare
+        run: |
+          brew install llvm >/dev/null
+          xcrun clang++ --version | head -1
+          $(brew --prefix llvm)/bin/clang++ --version | head -1
+          set +e
+          python3 tests/bitident/macos.py --apple "$(xcrun -f clang++)" --llvm "$(brew --prefix llvm)" --report bitident.md
+          code=$?
+          cat bitident.md >> $GITHUB_STEP_SUMMARY
+          exit $code
+
   sanitizers:
     runs-on: ubuntu-24.04
     steps:
