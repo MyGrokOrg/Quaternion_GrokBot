@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, msvc-support]
+    branches: [main]
   pull_request:
 
 jobs:

@@ -2,6 +2,22 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## MSVC and clang-cl support (Windows)
+
+Details are in the README section *Supported toolchains*.
+
+* **CI.** New job *windows* on `windows-latest` with CMake's default Visual Studio generator: MSVC 19.51 (toolset v145) in Debug and Release, and clang-cl 22.1 in Release, all with `/std:c++latest`. CI now has 16 jobs (13 before). The nightly fuzz workflow gained a *fuzz (msvc)* job (Release, double).
+* **Results.** All 9 test suites (core, math, io, special, special2, annexg, constexpr, bitident, example) pass in all three Windows jobs, including the comparisons with the MSVC STL's `std::` special math functions and every `constexpr` `static_assert`. Fuzz at seed 20261014, 250 samples per function (double): 0 failures; every function within 1.5× of GCC 14's worst error at the same seed (largest ratio `atan`, 1.56 vs 1.07 ε).
+* **Source fixes** (no change on GCC or Clang):
+  * `two_prod`: the literal `0x1p+16000L` in the x87-only branch is out of range where `long double` is binary64, and MSVC rejects it even in a discarded `if constexpr` branch (C2177, in all 9 targets). It is now `cx::pow2<T>(16000)`.
+  * The converting constructor `quaternion<T>(const quaternion<U>&)` decides `explicit` by floating-point conversion rank (`detail::fp_widens`) instead of a requires-expression inside `explicit(...)`. MSVC evaluated that form so that `quaternion<float>` was not constructible from `quaternion<double>` at all (C2607 in `test_core`). Same explicit-ness on every compiler.
+  * Vector-part norm on Windows: `detail::vnorm3`, correctly rounded, instead of `hypot(hypot(x, y), z)` from the Universal CRT, whose `hypot` is up to 1 ulp off even when the result is representable. Before → after, MSVC fuzz at seed 20261014: `sinh` at ‖v‖ = 109 63.8 → 1.75 ε (bound 16), `tgamma` at ‖v‖ = 25.6 69.1 → 2.51 ε (bound 64), `riemann_zeta` at ‖v‖ = 237 and 250 482 and 486 → 4.02 ε overall (bound 64), `tgamma_upper` 6.01 → 2.24 ε. The CRT's other functions were not the cause: over 4,000 inputs each (seed 20261014) its worst errors are `sin` 0.66, `cos` 0.74, `sinh` 0.85, `cosh` 0.94, `exp` 0.52, `log` 0.5, `expm1` 2.27 and `log1p` 0.99 ulp (glibc: 0.51, 0.51, 1.26, 0.98, 0.5, 0.5, 0.72, 0.74). `vnorm3` was correctly rounded in all of 3,000 double and 2,979 float test norms (1,000 of them exact oblique-axis norms), at about the speed of the nested glibc `hypot` (1.0–1.35×, noisy). Linux builds keep `std::hypot`.
+* **Tests.**
+  * `test_bitident`: where `long double` is binary64 its hashes must equal double's; double `abs` and `normalize` (C library `hypot`) have Universal CRT hashes. Before: 16 of 90 checks failed on clang-cl.
+  * `test_constexpr`: every difference between a constexpr and a runtime `abs` must be at most 1 ulp (new check); the bound of 16 differences in 256 now applies to glibc only. On the Universal CRT 25 of 256 differ; its `hypot` differs from a correctly rounded one in 370 of 200,000 float and 32,576 of 200,000 double inputs (seed 42).
+  * Tests and `fuzz_eval` build with `/W4 /WX` on MSVC. That needed: an `int` cast in `tests/bitident/ops.hpp` (C4805), `if constexpr … else` in two `test_special2` templates (24 × C4702 in Debug), `_CRT_SECURE_NO_WARNINGS` for `fuzz_eval`'s `scanf`, and a `-Wliteral-range` suppression for the x87-only reference 1.01e-3005 under clang-cl.
+* **Limits on Windows.** `long double` has double precision. `abs`/`normalize` use the CRT's `hypot` at run time. Sanitizers, benchmarks, `/arch:AVX2` builds, MinGW, 32-bit x86 and ARM64 are not tested. macOS is still on hold.
+
 ## FMA audit: near-equal subtractions, elementary-function fuzzing, haswell fuzz builds
 
 After the Hurwitz ζ fix (1adef77), every place that subtracts nearly equal values was checked in FMA and non-FMA builds. Details, the full list of sites and the documented limits are in the README section *FMA audit*.
