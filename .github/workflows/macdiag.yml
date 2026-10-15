@@ -1,0 +1,31 @@
+name: macdiag (temporary)
+on:
+  push:
+    branches: [macos-support]
+jobs:
+  beforeafter:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install mpmath==1.3.0
+          mkdir -p old/quaternion
+          for f in quaternion.hpp quaternion/quaternion.hpp quaternion/special_functions.hpp; do git show fc09a83:include/$f > old/$f; done
+          cxx=$(xcrun -f clang++); sdk=$(xcrun --show-sdk-path)
+          $cxx -isysroot $sdk -std=c++23 -O2 -Iold fuzz/fuzz_eval.cpp -o fe_old &
+          $cxx -isysroot $sdk -std=c++23 -O2 -Iinclude fuzz/fuzz_eval.cpp -o fe_new &
+          wait
+          python fuzz/fuzz.py --exe ./fe_old --types double --n 250 --seed 20261015 --report old.md > old.log 2>&1 &
+          python fuzz/fuzz.py --exe ./fe_new --types double --n 250 --seed 20261015 --report new.md > new.log 2>&1 &
+          wait
+          echo "## before (fc09a83)"; cat old.md; echo "## after"; cat new.md
