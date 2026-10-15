@@ -1,4 +1,5 @@
-// Temporary macOS diagnostics: long double libm functions, inputs/outputs in hex for mpmath.
+// Long double C library functions on random inputs, printed in hex for fuzz/libm_check.py (mpmath).
+// Informational, not part of CI: it measured Apple's x87 long double libm for the README (macOS x86_64).
 #include <cmath>
 #include <cstdio>
 #include <random>

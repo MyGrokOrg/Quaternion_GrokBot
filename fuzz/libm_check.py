@@ -1,3 +1,4 @@
+# Checks fuzz/libm_check.cpp output against mpmath:  ./libm_check > out.txt && python3 fuzz/libm_check.py out.txt
 import sys, mpmath as mp
 mp.mp.prec = 200
 F = {"exp": mp.exp, "expm1": mp.expm1, "log": mp.log, "log1p": mp.log1p, "sin": mp.sin, "cos": mp.cos,
