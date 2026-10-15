@@ -7,18 +7,31 @@
 #include "test_framework.hpp"
 #include "bitident/ops.hpp"
 #include <cstring>
+#include <limits>
+#include <string>
 
 struct golden { const char* type; const char* op; std::uint64_t hash; };
 static const golden G[] = {
 #include "bitident/golden.inc"
 };
 
+// abs and normalize call the C library's hypot.  The goldens are glibc's; the Universal CRT
+// (MSVC, clang-cl) rounds hypot differently, so Windows has its own hashes for those two
+// ("<type>@ucrt" entries in golden.inc).
+[[maybe_unused]] static bool uses_libm_hypot(const std::string& op) { return op == "abs" || op == "normalize"; }
+
 template <class T>
 void check(const char* tname) {
+    // Where long double is binary64 (MSVC), its results must equal double's bit for bit.
+    if (std::numeric_limits<T>::digits == 53 && std::strcmp(tname, "long_double") == 0) tname = "double";
     for (const auto& [name, h] : bitident::run<T>(true)) {
         bool found = false;
+        std::string type = tname;
+#if defined(_WIN32)
+        if (uses_libm_hypot(name)) type += "@ucrt";
+#endif
         for (const auto& g : G) {
-            if (std::strcmp(g.type, tname) != 0 || name != g.op) continue;
+            if (type != g.type || name != g.op) continue;
             found = true;
             const std::uint64_t want = g.hash;
             if (h != want) std::printf("  %s %s: %016llx, golden %016llx\n", tname, name.c_str(),

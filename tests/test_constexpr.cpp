@@ -95,13 +95,15 @@ bool same(T a, T b) { return std::memcmp(&a, &b, std::numeric_limits<T>::digits 
 
 template <class T> void constexpr_vs_runtime() {
     constexpr table<T> t = make_table<T>();
-    int div_diff = 0, abs_diff = 0;
+    int div_diff = 0, abs_diff = 0, abs_far = 0;
     for (int i = 0; i < 256; ++i) {
         volatile int vi = i;
         const auto q = sample<T>(vi) / sample<T>(vi + 256);
         const T c[4] = {q.w(), q.x(), q.y(), q.z()};
         for (int k = 0; k < 4; ++k) div_diff += !same(c[k], t.div[i][k]);
-        abs_diff += !same(abs(sample<T>(vi)), t.ab[i]);
+        const T ra = abs(sample<T>(vi));
+        abs_diff += !same(ra, t.ab[i]);
+        abs_far += !(ra == t.ab[i] || std::nextafter(ra, t.ab[i]) == t.ab[i]);
     }
 #if defined(__FMA__)
     // The runtime Hamilton product may be contracted into FMAs; constant evaluation never is.
@@ -110,7 +112,12 @@ template <class T> void constexpr_vs_runtime() {
     CHECK(div_diff == 0);
 #endif
     // abs: std::hypot (libm) at run time vs a correctly rounded hypot in constant evaluation.
+    // Each difference is at most 1 ulp.  glibc's hypot differs from the correctly rounded one
+    // rarely (<= 16 of these 256); the Universal CRT's (Windows) far more often.
+    CHECK(abs_far == 0);
+#if !defined(_WIN32)
     CHECK(abs_diff <= 16);
+#endif
     if (abs_diff) std::printf("  [%s] constexpr abs differs from runtime in %d of 256\n", qtest::current_type, abs_diff);
 }
 TEST(constexpr_matches_runtime) { FOR_EACH_TYPE(constexpr_vs_runtime); }

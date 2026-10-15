@@ -45,3 +45,6 @@
 {"long_double", "proj", 0x60d11327f6099cb2ULL},
 {"long_double", "pow_int", 0xc985f90dd2803ce7ULL},
 {"long_double", "compare", 0xf7032790255a711eULL},
+// Universal CRT hypot (MSVC and clang-cl on x64 Windows); see test_bitident.cpp.
+{"double@ucrt", "abs", 0xb070269c7907da60ULL},
+{"double@ucrt", "normalize", 0x1fb842d499f657f4ULL},
