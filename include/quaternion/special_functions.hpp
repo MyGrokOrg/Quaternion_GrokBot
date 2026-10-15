@@ -1612,46 +1612,95 @@ template <class T>
     if (p.imag() == T() && p.real() < T()) p.imag(-std::numeric_limits<T>::min() * T(1e100));
     return p;
 }
+// The same with s = sin phi, c = cos phi for real phi: next to the pole nu sin^2 phi = 1,
+// 1 - nu*s*s cancels, and how much it loses depends on whether it is contracted into an fma.
+// Where |c| <= |s| (Re nu <= 2 near the pole) it is (1 - Re nu) + Re nu c^2, with 1 - Re nu
+// exact and the small c^2 relatively accurate; otherwise s^2 and its product with Re nu are
+// carried exactly (two_prod).
+template <class T>
+[[nodiscard]] inline cplx<T> rj_param_sin(const cplx<T>& nu, T s, T c) {
+    const T nr = nu.real();
+    T re;
+    if (std::abs(c) <= std::abs(s)) {
+        const dd<T> c2 = two_prod(c, c);
+        re = (T(1) - nr) + (nr * c2.hi + nr * c2.lo);
+    } else {
+        const dd<T> s2 = two_prod(s, s), p1 = two_prod(nr, s2.hi);
+        re = ((T(1) - p1.hi) - p1.lo) - nr * s2.lo;
+    }
+    cplx<T> p(re, -nu.imag() * (s * s));
+    if (p.imag() == T() && p.real() < T()) p.imag(-std::numeric_limits<T>::min() * T(1e100));
+    return p;
+}
+// k'^2 = 1 - k^2 as (1 - k)(1 + k): next to k = +-1 the factor 1 -+ k is exact (Sterbenz),
+// while 1 - k*k loses the low bits of k*k (up to 7.3e5 eps in K and 7.6e5 eps in Pi next to
+// k = +-1 before the FMA audit), and whether it does depends on FMA contraction
+// (fma(-k, k, 1) is exact).
+template <class T>
+[[nodiscard]] inline cplx<T> one_minus_sq(const cplx<T>& k) {
+    return (T(1) - k) * (T(1) + k);
+}
+template <class T>
+[[nodiscard]] inline T one_minus_sq(T k) {
+    return (T(1) - k) * (T(1) + k);
+}
 template <class T>
 [[nodiscard]] inline cplx<T> comp_ellint_1k(const cplx<T>& k) {
-    if (k * k == cplx<T>(T(1))) return {std::numeric_limits<T>::infinity(), T()};
-    return carlson_rf(cplx<T>(), T(1) - k * k, cplx<T>(T(1)));
+    const cplx<T> y = one_minus_sq(k);
+    if (y == cplx<T>()) return {std::numeric_limits<T>::infinity(), T()};
+    return carlson_rf(cplx<T>(), y, cplx<T>(T(1)));
 }
 template <class T>
 [[nodiscard]] inline cplx<T> comp_ellint_2k(const cplx<T>& k) {
-    const cplx<T> k2 = k * k;
-    if (k2 == cplx<T>(T(1))) return {T(1), T()};
-    const cplx<T> y = T(1) - k2;
-    return carlson_rf(cplx<T>(), y, cplx<T>(T(1))) - k2 / T(3) * carlson_rd(cplx<T>(), y, cplx<T>(T(1)));
+    const cplx<T> y = one_minus_sq(k);
+    if (y == cplx<T>()) return {T(1), T()};
+    return carlson_rf(cplx<T>(), y, cplx<T>(T(1))) - k * k / T(3) * carlson_rd(cplx<T>(), y, cplx<T>(T(1)));
 }
 // Pi(nu, k) with std's convention int_0^{pi/2} dt / ((1 - nu sin^2 t) sqrt(1 - k^2 sin^2 t)).
 template <class T>
 [[nodiscard]] inline cplx<T> comp_ellint_3n(T k, const cplx<T>& nu) {
-    const cplx<T> y(T(1) - k * k);
+    const cplx<T> y(one_minus_sq(k));
     if (nu == cplx<T>(T(1))) return {std::numeric_limits<T>::infinity(), T()};
     return carlson_rf(cplx<T>(), y, cplx<T>(T(1))) +
            nu / T(3) * carlson_rj(cplx<T>(), y, cplx<T>(T(1)), rj_param(nu, T(1)));
+}
+// 1 - k^2 sin^2 phi as k'^2 + (k cos phi)^2: no cancellation next to k = 1, phi = pi/2, where
+// 1 - k*k*s*s lost up to 5.4e11 eps in F (the amount depending on FMA contraction).
+template <class T>
+[[nodiscard]] inline cplx<T> ellint_delta2(T k, const cplx<T>& c) {
+    const cplx<T> kc = k * c;
+    return one_minus_sq(k) + kc * kc;
+}
+template <class T>
+[[nodiscard]] inline T ellint_delta2(T k, T c) {
+    const T kc = k * c;
+    return one_minus_sq(k) + kc * kc;
 }
 // Reduce the amplitude: phi = phi0 + m pi with |Re phi0| <= pi/2.
 template <class T>
 [[nodiscard]] inline T amplitude_periods(const cplx<T>& phi) noexcept {
     return std::round(phi.real() / pi<T>);
 }
+// sin and cos of phi0 = phi - m pi as (-1)^m sin(phi), (-1)^m cos(phi): next to phi0 = +-pi/2
+// the cosine is small, and cos(phi - m*pi) would inherit the rounding of m*pi and of the
+// subtraction.
+template <class T>
+[[nodiscard]] inline T period_sign(T m) noexcept {
+    return std::fmod(m, T(2)) == T() ? T(1) : T(-1);
+}
 template <class T>
 [[nodiscard]] inline cplx<T> ellint_1p(T k, const cplx<T>& phi) {
-    const T m = amplitude_periods(phi);
-    const cplx<T> p0 = phi - m * pi<T>;
-    const cplx<T> s = std::sin(p0), c = std::cos(p0);
-    cplx<T> r = s * carlson_rf(c * c, T(1) - k * k * s * s, cplx<T>(T(1)));
+    const T m = amplitude_periods(phi), sg = period_sign(m);
+    const cplx<T> s = sg * std::sin(phi), c = sg * std::cos(phi);
+    cplx<T> r = s * carlson_rf(c * c, ellint_delta2(k, c), cplx<T>(T(1)));
     if (m != T()) r += T(2) * m * comp_ellint_1k(cplx<T>(k));
     return r;
 }
 template <class T>
 [[nodiscard]] inline cplx<T> ellint_2p(T k, const cplx<T>& phi) {
-    const T m = amplitude_periods(phi);
-    const cplx<T> p0 = phi - m * pi<T>;
-    const cplx<T> s = std::sin(p0), c = std::cos(p0);
-    const cplx<T> x = c * c, y = T(1) - k * k * s * s;
+    const T m = amplitude_periods(phi), sg = period_sign(m);
+    const cplx<T> s = sg * std::sin(phi), c = sg * std::cos(phi);
+    const cplx<T> x = c * c, y = ellint_delta2(k, c);
     cplx<T> r = s * carlson_rf(x, y, cplx<T>(T(1))) -
                 (k * k / T(3)) * s * s * s * carlson_rd(x, y, cplx<T>(T(1)));
     if (m != T()) r += T(2) * m * comp_ellint_2k(cplx<T>(k));
@@ -1659,12 +1708,11 @@ template <class T>
 }
 template <class T>
 [[nodiscard]] inline cplx<T> ellint_3n(T k, const cplx<T>& nu, T phi) {
-    const T m = std::round(phi / pi<T>);
-    const T p0 = phi - m * pi<T>;
-    const T s = std::sin(p0), c = std::cos(p0);
-    const cplx<T> x(c * c), y(T(1) - k * k * s * s);
+    const T m = std::round(phi / pi<T>), sg = period_sign(m);
+    const T s = sg * std::sin(phi), c = sg * std::cos(phi);
+    const cplx<T> x(c * c), y(ellint_delta2(k, c));
     cplx<T> r = s * carlson_rf(x, y, cplx<T>(T(1))) +
-                (nu / T(3)) * (s * s * s) * carlson_rj(x, y, cplx<T>(T(1)), rj_param(nu, s * s));
+                (nu / T(3)) * (s * s * s) * carlson_rj(x, y, cplx<T>(T(1)), rj_param_sin(nu, s, c));
     if (m != T()) r += T(2) * m * comp_ellint_3n(k, nu);
     return r;
 }

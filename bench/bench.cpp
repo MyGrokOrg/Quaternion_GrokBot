@@ -107,6 +107,12 @@ void special() {
     add<T>("special", "lambert_w", in, [](const Q<T>& q) { return quat::lambert_w(q); });
     add<T>("special", "airy_ai", in, [](const Q<T>& q) { return quat::airy_ai(q); });
     add<T>("special", "gamma_upper(1.5)", in, [](const Q<T>& q) { return quat::tgamma_upper(T(1.5), q); });
+    add<T>("special", "comp_ellint_1", in, [](const Q<T>& q) { return quat::comp_ellint_1(q); });
+    add<T>("special", "comp_ellint_2", in, [](const Q<T>& q) { return quat::comp_ellint_2(q); });
+    add<T>("special", "comp_ellint_3(0.6)", in, [](const Q<T>& q) { return quat::comp_ellint_3(T(0.6), q); });
+    add<T>("special", "ellint_1(0.8)", in, [](const Q<T>& q) { return quat::ellint_1(T(0.8), q); });
+    add<T>("special", "ellint_2(0.8)", in, [](const Q<T>& q) { return quat::ellint_2(T(0.8), q); });
+    add<T>("special", "ellint_3(0.6,1.2)", in, [](const Q<T>& q) { return quat::ellint_3(T(0.6), q, T(1.2)); });
     // Bessel: small, large |z| and large order
     const auto b1 = around<T>(T(2)), b30 = around<T>(T(30)), b300 = around<T>(T(300)), b3k = around<T>(T(3000));
     add<T>("bessel", "J_2.5(|z|~2)", b1, [](const Q<T>& q) { return quat::cyl_bessel_j(T(2.5), q); });
