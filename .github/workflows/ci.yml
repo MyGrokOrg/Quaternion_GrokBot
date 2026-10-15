@@ -43,7 +43,8 @@ jobs:
 
   windows:
     # MSVC (latest toolset on windows-latest, /std:c++latest via CMAKE_CXX_STANDARD 23)
-    # and clang-cl with the MSVC STL.  long double is double on this platform.
+    # and clang-cl with the MSVC STL, through the default (newest) Visual Studio generator.
+    # long double is double on this platform.
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -56,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Configure
-        run: cmake -B build -G "Visual Studio 17 2022" -A x64 ${{ matrix.toolset }}
+        run: cmake -B build -A x64 ${{ matrix.toolset }}
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} -j
       - name: Test
