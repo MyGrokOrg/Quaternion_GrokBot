@@ -28,7 +28,10 @@ void check(const char* tname) {
         bool found = false;
         std::string type = tname;
 #if defined(_WIN32)
-        if (uses_libm_hypot(name)) type += "@ucrt";
+        // (float abs/normalize match glibc's hashes, so only double has @ucrt entries.)
+        if (uses_libm_hypot(name))
+            for (const auto& g : G)
+                if (type + "@ucrt" == g.type && name == g.op) { type += "@ucrt"; break; }
 #endif
         for (const auto& g : G) {
             if (type != g.type || name != g.op) continue;
