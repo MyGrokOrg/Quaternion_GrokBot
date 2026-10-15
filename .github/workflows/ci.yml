@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, msvc-support]
   pull_request:
 
 jobs:
@@ -40,6 +40,29 @@ jobs:
         run: ctest --test-dir build --output-on-failure
       - name: Install
         run: cmake --install build --prefix ${{ runner.temp }}/install
+
+  windows:
+    # MSVC (latest toolset on windows-latest, /std:c++latest via CMAKE_CXX_STANDARD 23)
+    # and clang-cl with the MSVC STL.  long double is double on this platform.
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: msvc, toolset: "", build_type: Debug }
+          - { name: msvc, toolset: "", build_type: Release }
+          - { name: clang-cl, toolset: "-T ClangCL", build_type: Release }
+    name: ${{ matrix.name }} (${{ matrix.build_type }})
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 ${{ matrix.toolset }}
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} -j
+      - name: Test
+        run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure
+      - name: Install
+        run: cmake --install build --config ${{ matrix.build_type }} --prefix ${{ runner.temp }}/install
 
   sanitizers:
     runs-on: ubuntu-24.04
