@@ -59,7 +59,7 @@ jobs:
       - name: Configure
         run: |
           cmake -B build -A x64 ${{ matrix.toolset }}
-          Select-String -Path build/test_core.vcxproj -Pattern '<LanguageStandard>|<PlatformToolset>' | Select-Object -First 3
+          Select-String -Path build/test_core.vcxproj -Pattern '<LanguageStandard>' | Select-Object -First 1
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} -j
       - name: Test

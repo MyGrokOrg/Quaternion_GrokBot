@@ -41,6 +41,7 @@ if(BUILD_TESTING AND PROJECT_IS_TOP_LEVEL)
     target_link_libraries(quaternion_fuzz_eval PRIVATE quaternion)
     if(MSVC)
         target_compile_options(quaternion_fuzz_eval PRIVATE /W4 /WX /permissive- /utf-8)
+        target_compile_definitions(quaternion_fuzz_eval PRIVATE _CRT_SECURE_NO_WARNINGS)  # scanf
     else()
         target_compile_options(quaternion_fuzz_eval PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Werror)
     endif()
