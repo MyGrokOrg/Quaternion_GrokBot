@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, macos-support]
   pull_request:
 
 jobs:
@@ -129,6 +129,53 @@ jobs:
           $code = $LASTEXITCODE
           Get-Content bitident.md | Add-Content $env:GITHUB_STEP_SUMMARY
           exit $code
+
+  macos:
+    # Apple Clang (Xcode, with the SDK's libc++) and Homebrew LLVM clang (with its own libc++),
+    # arm64 on macos-latest (Apple Silicon) and x86_64 on macos-15-intel.  long double is
+    # double on Apple arm64 and x87 80-bit on x86_64.  AArch64 Clang contracts a*b+c into fma
+    # by default (-ffp-contract=on); x86_64 without -march has no fma.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: apple-clang arm64, runner: macos-latest, build_type: Debug }
+          - { name: apple-clang arm64, runner: macos-latest, build_type: Release }
+          - { name: llvm-clang arm64, runner: macos-latest, build_type: Debug, brew: true }
+          - { name: llvm-clang arm64, runner: macos-latest, build_type: Release, brew: true }
+          - { name: apple-clang x86_64, runner: macos-15-intel, build_type: Debug }
+          - { name: apple-clang x86_64, runner: macos-15-intel, build_type: Release }
+          - { name: llvm-clang x86_64, runner: macos-15-intel, build_type: Release, brew: true }
+    name: ${{ matrix.name }} (${{ matrix.build_type }})
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          uname -m; sw_vers -productVersion
+          if [ "${{ matrix.brew }}" = true ]; then
+            brew install llvm >/dev/null
+            p=$(brew --prefix llvm)
+            echo "CXX=$p/bin/clang++" >> $GITHUB_ENV
+            # Homebrew's libc++ instead of the SDK's (as in Homebrew's llvm caveats)
+            echo "LDFLAGS=-L$p/lib/c++ -L$p/lib/unwind -lunwind -Wl,-rpath,$p/lib/c++" >> $GITHUB_ENV
+          else
+            echo "CXX=$(xcrun -f clang++)" >> $GITHUB_ENV
+          fi
+      - name: Configure
+        run: |
+          $CXX --version | head -1
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+      - name: Build
+        run: cmake --build build -j 4
+      - name: Test
+        run: |
+          ctest --test-dir build --output-on-failure
+          # informational: the C library's hypot vs a correctly rounded one; FMA build?
+          ./build/test_constexpr | grep -E 'hypot|differs' || true
+          ./build/test_bitident | grep 'FMA build' || true
+      - name: Install
+        run: cmake --install build --prefix ${{ runner.temp }}/install
 
   sanitizers:
     runs-on: ubuntu-24.04
