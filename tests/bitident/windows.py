@@ -10,7 +10,13 @@ workflow), and runs both.  It then checks:
     Universal CRT's own entries for abs/normalize ("double@ucrt"; "double@ucrt-arm64" on
     ARM64 if present) and long double compared as double;
   * every build vs the first (plain) build of the same compiler, listing which operations
-    change; builds marked same=True must be identical to it.
+    change; builds with a "same" entry must be identical to that build.
+
+MSVC with /fp:contract: since the headers compile their own code with fp_contract(off) there
+(see quaternion.hpp), the library is not contracted and the new header must give the plain
+build's bits and the goldens.  The pre-constexpr header has no such pragma, so old vs new
+is expected to differ in that build (only the transcendental-free operations that the
+compiler contracts); that difference is listed, not failed.
 
 Exit status 1 on any failure.  A Markdown summary goes to --report.
 """
@@ -19,19 +25,19 @@ import argparse, os, re, shutil, subprocess, sys
 COMMON = ["/nologo", "/std:c++latest", "/EHsc", "/utf-8", "/O2"]
 
 def builds(arch, clangcl):
-    # (name, compiler, extra flags, contracts?, same-as-plain?)
+    # (name, compiler, extra flags, library code contracted?, must equal this build)
     b = []
     if arch == "x64":
         b += [("msvc", "cl", [], False, None),
               ("msvc /arch:AVX2", "cl", ["/arch:AVX2"], False, "msvc"),
-              ("msvc /arch:AVX2 /fp:contract", "cl", ["/arch:AVX2", "/fp:contract"], True, None)]
+              ("msvc /arch:AVX2 /fp:contract", "cl", ["/arch:AVX2", "/fp:contract"], False, "msvc")]
         if clangcl:
             b += [("clang-cl", clangcl, [], False, None),
                   ("clang-cl /arch:AVX2", clangcl, ["/arch:AVX2"], True, None),
                   ("clang-cl /arch:AVX2 -ffp-contract=off", clangcl, ["/arch:AVX2", "/clang:-ffp-contract=off"], False, "clang-cl")]
     else:
         b += [("msvc", "cl", [], False, None),
-              ("msvc /fp:contract", "cl", ["/fp:contract"], True, None)]
+              ("msvc /fp:contract", "cl", ["/fp:contract"], False, "msvc")]
         if clangcl:
             b += [("clang-cl", clangcl, [], True, None),
                   ("clang-cl -ffp-contract=off", clangcl, ["/clang:-ffp-contract=off"], False, None)]
@@ -91,7 +97,10 @@ def main():
         else:
             diff = sorted(k for k in new_raw if old_raw.get(k) != new_raw[k])
             ovn = "identical" if not diff else "DIFFER: " + ", ".join("%s %s" % k for k in diff)
-            if diff: fails.append("%s: old vs new differ: %s" % (name, diff))
+            if diff and "/fp:contract" in name:
+                ovn = "differ as expected (old header contracted; new: fp_contract off): " + ", ".join("%s %s" % k for k in diff)
+            elif diff:
+                fails.append("%s: old vs new differ: %s" % (name, diff))
         if contracts:
             vg = "skipped (contracting build)"
         else:
@@ -105,10 +114,10 @@ def main():
                 if want != h: bad.append("%s %s %s (golden %s)" % (t, op, h, want))
             vg = "all %d match" % len(new_c) if not bad else "%d DIFFER: %s" % (len(bad), "; ".join(bad))
             if bad: fails.append("%s: golden mismatch: %s" % (name, bad))
-        plain = name.split(" ")[0]
+        plain = same or name.split(" ")[0]
         if plain in canon and plain != name:
             d = sorted("%s %s" % k for k in new_c if canon[plain].get(k) != new_c[k])
-            vp = "identical" if not d else "%d differ: %s" % (len(d), ", ".join(d))
+            vp = ("identical" if not d else "%d differ: %s" % (len(d), ", ".join(d))) + " (vs `%s`)" % plain
             if same and d: fails.append("%s: expected identical to %s: %s" % (name, plain, d))
         else:
             vp = "(plain build)"
