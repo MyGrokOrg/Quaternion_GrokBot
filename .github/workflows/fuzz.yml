@@ -110,9 +110,10 @@ jobs:
           name: fuzz-report-${{ matrix.name }}
           path: fuzz-report.md
 
-  # macOS: Apple Clang (Xcode, the SDK's libc++).  arm64 on macos-latest, where Clang contracts
-  # a*b+c into fma by default and long double is double (double only, as on Windows); x86_64
-  # on macos-15-intel, no fma, x87 80-bit long double (double and long double).
+  # macOS: Apple Clang (Xcode, the SDK's libc++), double only.  arm64 on macos-latest, where
+  # Clang contracts a*b+c into fma by default and long double is double (as on Windows);
+  # x86_64 on macos-15-intel, no fma.  x86_64 long double is x87 80-bit, but Apple's long
+  # double libm (sinl/cosl, powl, sinhl, tgammal) is far outside the fuzz bounds; see the README.
   fuzz-macos:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -121,7 +122,7 @@ jobs:
       matrix:
         include:
           - { name: apple-clang-arm64, runner: macos-latest, types: "double" }
-          - { name: apple-clang-x86_64, runner: macos-15-intel, types: "double,long double" }
+          - { name: apple-clang-x86_64, runner: macos-15-intel, types: "double" }
     name: fuzz (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v5
