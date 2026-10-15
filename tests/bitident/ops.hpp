@@ -100,7 +100,7 @@ std::vector<std::pair<std::string, std::uint64_t>> run(bool canonical) {
         for (int n = -3; n <= 5; ++n) h.q(pow(p, n));
     });
     op("compare", [](hasher& h, const Q& p, const Q& r) {
-        h.byte(static_cast<unsigned char>((p == r) | ((p != r) << 1) | ((p == p.w()) << 2) | ((p == std::complex<T>(p.w(), p.x())) << 3)));
+        h.byte(static_cast<unsigned char>(int(p == r) | ((p != r) << 1) | ((p == p.w()) << 2) | ((p == std::complex<T>(p.w(), p.x())) << 3)));
     });
     return out;
 }

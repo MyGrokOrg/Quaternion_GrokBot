@@ -57,7 +57,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Configure
-        run: cmake -B build -A x64 ${{ matrix.toolset }}
+        run: |
+          cmake -B build -A x64 ${{ matrix.toolset }}
+          Select-String -Path build/test_core.vcxproj -Pattern '<LanguageStandard>|<PlatformToolset>' | Select-Object -First 3
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} -j
       - name: Test

@@ -1333,7 +1333,7 @@ constexpr nzref bessel_k_small_refs[] = {
     {0x1.8000000000000p+3L, 0x1.6e6a898c7884ep+1L, 0x1.d73d2c9ad34b2p+2L, -3.78141778015129423461965151455L, -0.905941790899070788553154300611L},
 };
 template <class T> void bessel_near_zeros() {
-    if constexpr (std::is_same_v<T, float>) return;  // inputs are doubles
+    if constexpr (std::is_same_v<T, float>) { return; } else {  // (else: no C4702 on MSVC)  // inputs are doubles
     using Q = quaternion<T>;
     const T e = std::numeric_limits<T>::epsilon();
     double worst_rel = 0, worst_abs = 0, worst_k = 0;
@@ -1364,6 +1364,7 @@ template <class T> void bessel_near_zeros() {
     }
     std::printf("  [%s] J near zeros: worst %.3g eps relative, %.3g absolute at rounded zeros; K small |w|: %.3g eps\n",
                 qtest::current_type, worst_rel, worst_abs, worst_k);
+    }
 }
 }  // namespace
 
@@ -1395,7 +1396,7 @@ constexpr fzref fuzz_regressions[] = {
     {"lambert_w", 0x0.0p+0L, -0x1.0000000000000p+0L, 0x0.0p+0L, -0.318131505204764135312654251588L, 1.33723570143068940890116214319L},
 };
 template <class T> void fuzz_regression() {
-    if constexpr (std::is_same_v<T, float>) return;  // inputs are doubles
+    if constexpr (std::is_same_v<T, float>) { return; } else {  // (else: no C4702 on MSVC)  // inputs are doubles
     const T e = std::numeric_limits<T>::epsilon();
     double worst = 0;
     for (const auto& r : fuzz_regressions) {
@@ -1411,6 +1412,7 @@ template <class T> void fuzz_regression() {
         qtest::check(err <= 64, r.fn.data());
     }
     std::printf("  [%s] fuzz regressions: worst %.3g eps\n", qtest::current_type, worst);
+    }
 }
 }  // namespace
 
