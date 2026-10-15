@@ -2,6 +2,37 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## FMA audit: near-equal subtractions, elementary-function fuzzing, haswell fuzz builds
+
+After the Hurwitz ζ fix (1adef77), every place that subtracts nearly equal values was checked in FMA and non-FMA builds. Details, the full list of sites and the documented limits are in the README section *FMA audit*.
+
+* **Method.** New script `fuzz/fma_audit.py` runs the same exact inputs through four builds of `fuzz/fuzz_eval.cpp` (GCC 14 and Clang 19 at `-O2`, each without and with `-march=haswell`) and compares each with mpmath. It covers 50 targeted sites (`--sites`) and 64 functions on the fuzz regions. All audit figures: double, worst error in ε, 300 points per site or function, seed 1.
+* **Fixed** (before → after):
+
+  | Site | Before | After |
+  |---|---|---|
+  | `erfc`, 0.4 ≤ \|Re z\| ≤ 1.3 | 19.4 (no FMA), 47.9 (GCC haswell); flagged FMA-sensitive | 8.46, 12.3 (10.6 Clang haswell) |
+  | `erf`, tiny vector part | 76.5 | 17.7 |
+  | `comp_ellint_1`, k next to ±1 | 7.28e5 | 2.45 |
+  | `comp_ellint_3`, real k next to ±1 | 7.6e5 (no FMA), 6.54 / 6.27 (haswell); flagged FMA-sensitive | 6.66 / 6.54 / 6.27 |
+  | `ellint_1`, k next to 1, φ next to π/2 | 5.39e11 | 4.68 |
+  | `ellint_2`, φ next to π/2 | 8.35 | 7.64 |
+  | `ellint_3`, k next to 1, ν sin²φ next to 1 (÷ conditioning in φ) | 1.19e6 | 0.406 |
+  | `atanh`, z next to ±1 with \|z\| > 1 | 8.5e4 | 0.471 |
+
+  * `erf`/`erfc`: the double-length Maclaurin series now covers |Re z| < 5/4 with |z| < 4 (was |Re z| < ½), and `erfc` there is 1 − erf from the double-length sum, rounded once. The Laplace continued fraction needed about 700 steps near |z| = ½, and FMA contraction changed how their rounding added up.
+  * Elliptic integrals: k′² = (1 − k)(1 + k) instead of 1 − k·k (which is exact only if contracted into `fma(−k, k, 1)`); 1 − k² sin²φ = k′² + (k cos φ)²; the reduced amplitude's sine and cosine are (−1)^m sin φ, (−1)^m cos φ instead of sin, cos of φ − mπ; and in Π(ν, φ, k), 1 − ν sin²φ is (1 − Re ν) + Re ν cos²φ where |cos φ| ≤ |sin φ|, otherwise formed with sin²φ and its product with Re ν carried exactly.
+  * `atanh` (and `atan` = −i·atanh(iz)): Kahan's forms ¼·log1p(4x/((1−x)² + y²)) and ½·atan2(2y, (1−x)(1+x) − y²) for |Re z|, |Im z| < 2, instead of (log1p z − log1p(−z))/2 and the detour through 1/z.
+  * Over the 64 functions, `erf` (14.6 → 7.66 without FMA, 29.4 → 8.58 with GCC haswell) and `erfc` (22.8 → 7.77, 49.3 → 4.7) were the only ones flagged FMA-sensitive; none is now. Also `comp_ellint_1` 9.46e5 → 3.2, `ellint_1` 5.94e7 → 3.51, `ellint_2` 76 → 56.7, `comp_ellint_2` 38.6 → 36.4, `atanh` 1.05e5 → 1.01.
+* **Found by the new elementary-function fuzz regions** (`fuzz/fuzz.py`, 250 points per function and type, seed 20261014), both fixed:
+  * Real arguments of `asin`, `acos`, `asinh`, `acosh`, `atanh` and `atan` take the Annex G path, which called the `std::complex` functions through argument-dependent lookup instead of this library's kernels; on libc++ they lost accuracy (50 failures). Clang 18 with libc++, before → after: double `asin` 3.23e3 → 1.87, `asinh` 812 → 1.65, `acosh` 2.29e6 → 1.27, `atanh` 912 → 1.38; long double `asin` 73.7 → 1.68, `asinh` 2.78e3 → 1.56, `acosh` 4.04e7 → 1.4, `atanh` 2.67e3 → 1.42.
+  * `atan` with a tiny vector part (every library): double 4.5e15 → 1.07 (1.08 with haswell), long double 9.22e18 → 1.51.
+* **Documented limits, not FMA effects:** `log`/`log10` next to |z| = 1 (log(hypot), absolute accuracy: up to 1.47e6 / 6.8e5 ε in double and 1.14e8 / 1.78e8 ε in long double; listed by the fuzz job but not failed); the vector part of `expint`, `cyl_bessel_j` (|z| > 16), `airy_ai` and `polylog` for tiny |v| (absolute, about ε·|f|); `comp_ellint_2` next to k = 1 (46.5 ε before and after, from R_F − (k²/3)R_D).
+* **Nightly fuzz.** `fuzz.py` now also samples the 17 elementary functions (16 ε bounds, 64 ε for `pow`), including tiny vector parts and points next to ±1, 0, π/2 and π, and puts a quarter of the points on the oblique axis (2, 3, 6)/7. The workflow gained two FMA builds, GCC 14 and Clang 19 with `-march=haswell` (after a check that the runner has FMA and AVX2), and an informational *fma-audit* job. Locally all four fuzz builds pass with no failures at seed 20261014. A harness bug was fixed on the way: two envelope lines had landed in `reference()`, where they used an undefined variable, so every `expint` point and every Hurwitz ζ point with Re s < 0 raised an exception and was skipped as an mpmath failure. Those points are now checked (the Hurwitz term is |a + n|^−s, with the arguments the right way round).
+* **Speed** (medians of 5 alternating runs of the old and new header, `-O3`, new/old, GCC 14 / GCC 14 haswell / Clang 19): `erf` 0.55–0.61, `erf(0.8+1.5i)` 0.28–0.42, `erfc(0.6+0.5i)` 0.08–0.12; `atanh` 0.35–0.45 and `atan` 0.43–0.51; unchanged `erfc` paths 0.97–1.06; the six elliptic cases 0.92–1.11 (shared machine, so within noise).
+* **Tests.** All suites pass with GCC 14, Clang 18 and 19 on libstdc++ and libc++ in Debug and Release, with sanitizers, and with GCC 14 and Clang 18 at `-march=haswell`; the haswell bit-identity comparison against 91cad1a is unchanged (45 hashes, `-O2` and `-O3`).
+* **New bench cases:** `erf(0.8+1.5i)`, `erfc(0.6+0.5i)`, `erfc(2.5+i)`, `erfc(0.6+5i)`, `comp_ellint_1`, `comp_ellint_2`, `comp_ellint_3(0.6)`, `ellint_1(0.8)`, `ellint_2(0.8)`, `ellint_3(0.6,1.2)`.
+
 ## Fix: Hurwitz ζ with FMA contraction (GCC 14 `-march=haswell`)
 
 * **Symptom.** With GCC 14 and `-march=haswell`, `test_special2` failed 13 `hurwitz_zeta` checks:

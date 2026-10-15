@@ -29,12 +29,13 @@ cmake --install build --prefix /your/prefix     # optional
 
 **Benchmarks.** `-DQUATERNION_BUILD_BENCHMARKS=ON` builds `quaternion_bench`, a self-contained suite with no dependencies. It covers core operations, elementary functions, and special functions, including Bessel and ζ at small and large arguments and orders. Each case is repeated until `--min-time` seconds (default 0.2) have passed, and the report gives the mean ns per call. `--filter SUBSTR` selects cases by `group/case/type`, and `--json FILE` writes the results. CI runs the suite in a non-gating job and uploads `bench.json`/`bench.txt` as the `benchmark-results` artifact. The timings come from shared runners, so treat them as indicative only.
 
-**Nightly mpmath fuzz.** `.github/workflows/fuzz.yml` runs every night at 06:17 UTC and can also be started by hand (Actions → *Nightly mpmath fuzz* → *Run workflow*, with optional `seed` and `samples`). It is a separate workflow, so it never blocks a merge. `fuzz/fuzz.py` samples 22 special functions with exact binary inputs, including:
+**Nightly mpmath fuzz.** `.github/workflows/fuzz.yml` runs every night at 06:17 UTC and can also be started by hand (Actions → *Nightly mpmath fuzz* → *Run workflow*, with optional `seed` and `samples`). It is a separate workflow, so it never blocks a merge. `fuzz/fuzz.py` samples 22 special functions and the 17 elementary functions (`exp` … `atanh`) with exact binary inputs, including:
 * points exactly on the real axis, and |z| from 10⁻¹² to 400;
 * small, negative, half-integer and large (20–100) Bessel orders;
-* ζ next to s = 0 and s = 1, and Li_s with s next to an integer.
+* ζ next to s = 0 and s = 1, and Li_s with s next to an integer;
+* for the elementary functions, a tiny vector part (10⁻³⁰⁰ to 10⁻⁶, where the vector part of the result must stay relatively accurate) and points next to ±1, 0, π/2 and π.
 
-Each point is put on a random axis ±i, ±j, ±k, which also exercises the axis reduction. The C++ evaluator `fuzz/fuzz_eval.cpp` (target `quaternion_fuzz_eval`, built with the tests) computes the values, and the script compares them with mpmath at 40 digits. The bounds are in `BOUNDS` in `fuzz/fuzz.py`: 64 ε for most functions, 16 ε for Lambert W, 128 ε for Γ(a, z) and the Airy functions, 512 ε for Li_s, 64·|s| ε for Hurwitz ζ, and 2048 ε for Bessel orders ≥ 20. They are relative, except where this README documents absolute accuracy: oscillatory J/Y/I/K/Airy near their zeros are measured against the envelope, and Hurwitz ζ(s, a) with Re a < 0 against its largest term |a + n|^−s. Results within a factor 2¹² of the largest finite value are not compared, because Bessel intermediates can overflow there first (e.g. Y_ν at ν ≈ 85, |z| ≈ 0.014, where Y ≈ 1.9e307 comes out as ±inf). Any excess fails the job and is listed with its exact hex inputs. The seed is printed and written to the job summary, and `python3 fuzz/fuzz.py --exe build/quaternion_fuzz_eval --seed S --n N` reproduces a run locally. It runs with GCC 14 (libstdc++) and Clang 18 (libc++).
+Each point is put on a random axis ±i, ±j, ±k, or (for a quarter of the points) on the oblique axis (2, 3, 6)/7, which also exercises the axis reduction. The C++ evaluator `fuzz/fuzz_eval.cpp` (target `quaternion_fuzz_eval`, built with the tests) computes the values, and the script compares them with mpmath at 40 digits. The bounds are in `BOUNDS` in `fuzz/fuzz.py`: 16 ε for the elementary functions (64 ε for `pow`), 64 ε for most special functions, 16 ε for Lambert W, 128 ε for Γ(a, z) and the Airy functions, 512 ε for Li_s, 64·|s| ε for Hurwitz ζ, and 2048 ε for Bessel orders ≥ 20. They are relative, except where this README documents absolute accuracy: oscillatory J/Y/I/K/Airy near their zeros are measured against the envelope, and Hurwitz ζ(s, a) with Re a < 0 against its largest term |a + n|^−s. Results within a factor 2¹² of the largest finite value are not compared, because Bessel intermediates can overflow there first (e.g. Y_ν at ν ≈ 85, |z| ≈ 0.014, where Y ≈ 1.9e307 comes out as ±inf). Any excess fails the job and is listed with its exact hex inputs. The seed is printed and written to the job summary, and `python3 fuzz/fuzz.py --exe build/quaternion_fuzz_eval --seed S --n N` reproduces a run locally. It runs with GCC 14 (libstdc++), Clang 18 (libc++), and two FMA builds, GCC 14 and Clang 19 with `-march=haswell` (the job first checks that the runner has FMA and AVX2). `log` and `log10` next to |z| = 1 are listed in the report but not failed (see [FMA audit](#fma-audit)). A further job, *fma-audit*, runs `fuzz/fma_audit.py` (described there) and writes its tables to the job summary; it is informational and never fails.
 
 ```bash
 cmake -B build-bench -DCMAKE_BUILD_TYPE=Release -DQUATERNION_BUILD_BENCHMARKS=ON
@@ -154,14 +155,14 @@ So `f(q)` lies in the same complex plane as `q` and commutes with it. On the `i`
 
 | Function | Notes |
 |---|---|
-| `asin acos atan asinh acosh atanh` | Branch cuts are those of `std::complex` (C99 Annex G). `asin` and `acos` use the algorithm of Hull, Fairgrieve and Tang (1997), with `asinh z = −i·asin(iz)` and `acosh` from `acos`. `atanh` and `atan` have their own kernels: `(log1p z − log1p(−z))/2`, with `atanh(1/z) ± iπ/2` for `|z| > 1`, and `atan z = −i·atanh(iz)`. They are accurate to a few ulp on every standard library. |
+| `asin acos atan asinh acosh atanh` | Branch cuts are those of `std::complex` (C99 Annex G). `asin` and `acos` use the algorithm of Hull, Fairgrieve and Tang (1997), with `asinh z = −i·asin(iz)` and `acosh` from `acos`. `atanh` and `atan` have their own kernels: `(log1p z − log1p(−z))/2`, with `atanh(1/z) ± iπ/2` for `|z| > 1`, and `atan z = −i·atanh(iz)`; for |Re z|, |Im z| < 2, `atanh` uses Kahan's forms ¼·log1p(4x/((1−x)² + y²)) and ½·atan2(2y, (1−x)(1+x) − y²), which do not cancel next to ±1 or for small Re z. They are accurate to a few ulp on every standard library, also for real arguments (which go through the Annex G path). |
 | `expm1(q)`, `log1p(q)` | Keep full relative accuracy for small `q`. |
 | `cbrt(q)` | Principal cube root (`cbrt(-8) = 1 + √3 i`), like `std::pow(z, 1/3)`. For real `x ≥ 0` it matches `std::cbrt`. |
 | `tgamma(q)` | Γ = exp(log Γ), with log Γ carried in double-length (hi + lo) arithmetic, so the size of log Γ costs no accuracy. Uses reflection `Γ(z)Γ(1−z) = π/sin πz` for `Re < ½`, with sin πz kept in split exponential form so it cannot overflow. Gives ±∞ at 0 and NaN at negative integers, like `<cmath>`. |
 | `lgamma(q)` | log Γ on the analytic-continuation branch (mpmath's `loggamma`). The real part is `log|Γ|`, which equals `std::lgamma` on the real axis. For `Re z < −4000` it uses reflection, then restores the continuous branch by choosing the multiple of 2πi from Stirling's formula. |
 | `digamma(q)` | ψ = Γ′/Γ. Uses the asymptotic series after recurrence, and reflection for `Re < ½`. |
 | `beta(q, b)`, `beta(b, q)` | B(q, b) = Γ(q)Γ(b)/Γ(q+b) for real `b`. Two quaternions on different axes have no well-defined beta. |
-| `erf(q)`, `erfc(q)` | Maclaurin series for `|Re| < ½`, summed in double-length arithmetic. `exp(−z²)` is formed with `z²` split exactly by FMA. Otherwise the Laplace continued fraction for `erfc` (modified Lentz), with `erfc(−z) = 2 − erfc(z)`. |
+| `erf(q)`, `erfc(q)` | Maclaurin series for `|Re| < ½`, and for `|Re| < 5/4` with `|z| < 4`, summed in double-length arithmetic; `erfc` there is 1 − erf from the same double-length sum, rounded once. `exp(−z²)` is formed with `z²` split exactly by FMA. Otherwise the Laplace continued fraction for `erfc` (modified Lentz), with `erfc(−z) = 2 − erfc(z)`. |
 | `riemann_zeta(q)` | ζ. On `Re ≥ ½`, uses Borwein's η algorithm for `|Im s| ≤ 1` and Euler–Maclaurin summation otherwise. The Euler–Maclaurin sum takes N ≈ 0.3·|s| + 30 terms plus up to 80 Bernoulli corrections (B₂ⱼ/(2j)! = 2(−1)^{j+1}ζ(2j)/(2π)^{2j} for j > 20), so there is no cap on `|Im s|`. The log k come from a smallest-prime-factor sieve: log k = log p + log(k/p) in double-length arithmetic, so only primes need a logarithm. The cost is O(|s|), about 0.1 µs per unit of |Im s| in double (8 ms at |Im s| = 10⁵). On `Re < ½` it uses the functional equation. The phases `Im(s)·log k`, the partial sum and the functional-equation exponent are carried in double-length arithmetic. ζ(1) = ∞, ζ(0) = −½, and the trivial zeros are exact. |
 | `cyl_bessel_j(n, q)` | J_n for integer `n` (an entire function). For `|z| ≤ 16` it sums the ascending series in double-length arithmetic, so the error is relative even next to the zeros. For larger `|z|` it uses Hankel's expansion when n² < |z|, and otherwise Miller's backward recurrence, normalized by `1 = J₀ + 2ΣJ₂ₖ` or `cos z = J₀ + 2Σ(−1)ᵏJ₂ₖ`, whichever cancels less. |
 
@@ -325,6 +326,57 @@ Q v = r * 1.0_i * conj(r);                              // ≈ (0,0,1,0)
 * Annex G special values cover the elementary functions and arithmetic, but not the other special functions (gamma, zeta, Bessel, …). With non-finite input these return whatever their kernels produce, usually NaN.
 * For large ‖v‖, `exp`, `sin`, `cos`, `sinh`, `cosh` and `tanh` inherit the conditioning of the rounded θ = ‖v‖: a relative error of ε·θ in `cos θ`/`sin θ`. These errors are unchanged by the Annex G work.
 * In a `std::format` spec, the width counts code points, not East Asian display widths. That only matters for a wide fill character or a locale with non-ASCII digits.
+
+## FMA audit
+
+Commit 1adef77 fixed a Hurwitz ζ failure where GCC's FMA contraction (`-march=haswell`) rounded two conjugate products asymmetrically, and their small difference overflowed to −inf. The audit looked for other places that subtract nearly equal values and checked each of them in FMA and non-FMA builds.
+
+**Method.** `fuzz/fma_audit.py` evaluates the same exact inputs with four builds of `fuzz/fuzz_eval.cpp` (GCC 14 and Clang 19 at `-O2`, each without and with `-march=haswell`) and compares each with mpmath. It reports, per site or function, the worst and mean error in ε of double, how many results differ in their bits between builds, and the largest difference between the FMA and the non-FMA build of one compiler. A site is flagged *FMA-SENSITIVE* when the FMA builds are more than twice as bad as the non-FMA builds (and above 8 ε), or the other way round, or the means differ by more than 30%. `--sites` runs 50 targeted sites, each aimed at one subtraction; without it the script covers 64 functions on the fuzz regions. Near zeros of oscillatory functions and next to poles, a site's error is divided by the input condition number. All figures below are double, 300 points per site or function, seed 1. To reproduce: `python3 fuzz/fma_audit.py --sites --exe gcc=… --exe gcc-hsw=… --exe clang=… --exe clang-hsw=… --n 300 --seed 1`.
+
+**Fixed** (worst error in ε, before → after):
+
+| Site | Cause | Before | After |
+|---|---|---|---|
+| `erf`/`erfc`, 0.4 ≤ \|Re z\| ≤ 1.3 | The Laplace continued fraction needs about 700 steps near \|z\| = ½, and FMA contraction changes how their rounding errors add up. Now the double-length series covers \|Re z\| < 5/4 with \|z\| < 4. | 19.4 (no FMA), 47.9 (GCC haswell); 256/300 results differed between builds; FMA-SENSITIVE | 8.46 (no FMA), 12.3 (GCC haswell), 10.6 (Clang haswell); 23/300 differ |
+| `erf`, tiny vector part (Im f/\|v\|) | same | 76.5 | 17.7 |
+| `comp_ellint_1`, k next to ±1 | 1 − k·k loses the low bits of k² unless it is contracted into `fma(−k, k, 1)`. Now k′² = (1 − k)(1 + k), with 1 ∓ k exact. | 7.28e5 (all builds); FMA vs non-FMA difference 1.74e4 | 2.45; difference 2.29 |
+| `comp_ellint_3`, real k next to ±1 | same | 7.6e5 (no FMA), 6.54 (GCC haswell), 6.27 (Clang haswell); FMA-SENSITIVE | 6.66, 6.54, 6.27 |
+| `ellint_1`, k next to 1 and φ next to π/2 | 1 − k²·sin²φ cancels, and cos(φ − mπ) inherits the rounding of mπ. Now 1 − k² sin²φ = k′² + (k cos φ)², and sin, cos of the reduced amplitude are (−1)^m sin φ, (−1)^m cos φ. | 5.39e11; difference 2.29e4 | 4.68; difference 2.49 |
+| `ellint_2`, φ next to π/2 | same | 8.35 | 7.64 |
+| `ellint_3`, k next to 1 and ν sin²φ next to 1 (error / max(1, \|φ·∂Π/∂φ / Π\|)) | the above, and 1 − ν sin²φ, now (1 − Re ν) + Re ν·cos²φ where \|cos φ\| ≤ \|sin φ\|, otherwise with sin²φ and its product with Re ν carried exactly | 1.19e6; difference 1.46e3 | 0.406; difference 0.215 |
+| `atanh` (and `atan`), z next to ±1 with \|z\| > 1 | Through 1/z, 1 − Re(1/z) inherits the rounding of the division. Now Kahan's forms (see the table above) for \|Re z\|, \|Im z\| < 2. | 8.5e4 | 0.471 |
+
+Over the 64 functions on the fuzz regions, `erf` (14.6 → 7.66 without FMA, 29.4 → 8.58 with GCC haswell) and `erfc` (22.8 → 7.77, 49.3 → 4.7) were the only FMA-SENSITIVE ones, and no function is flagged now. Other worst cases there, before → after: `comp_ellint_1` 9.46e5 → 3.2, `ellint_1` 5.94e7 → 3.51, `ellint_2` 76 → 56.7, `comp_ellint_2` 38.6 → 36.4, `atanh` 1.05e5 → 1.01.
+
+The fuzz job (`fuzz/fuzz.py`, 250 points per function and type, seed 20261014) found two more problems through its new elementary-function regions, both fixed:
+
+* **libc++, real arguments.** A real argument of `asin`, `acos`, `asinh`, `acosh`, `atanh` or `atan` goes through the Annex G path, which called `std::asinh`, `std::atanh`, `std::acosh` and `std::acos` for `std::complex` through argument-dependent lookup instead of this library's kernels. On libc++ those lost accuracy (50 failures). Worst errors with Clang 18 and libc++, before → after: double `asin` 3.23e3 → 1.87, `asinh` 812 → 1.65, `acosh` 2.29e6 → 1.27, `atanh` 912 → 1.38; long double `asin` 73.7 → 1.68, `asinh` 2.78e3 → 1.56, `acosh` 4.04e7 → 1.4, `atanh` 2.67e3 → 1.42.
+* **`atan` with a tiny vector part** (all libraries): Re atanh(z) = (log1p z − log1p(−z))/2 cancelled for small Re z, so the vector part was only absolutely accurate. Before → after: double 4.5e15 → 1.07 (1.08 with haswell), long double 9.22e18 → 1.51.
+
+After the fixes, all four fuzz builds (GCC 14, Clang 18 with libc++, GCC 14 and Clang 19 with `-march=haswell`) pass with no failures at that seed. The audit also fixed a harness bug: two envelope lines had landed in `reference()`, where they used an undefined variable, so every `expint` point and every Hurwitz ζ point with Re s < 0 had been skipped as an mpmath failure. At the same seed these are now checked and pass: `expint` worst 6.4 ε (7.87 GCC haswell, 9.36 Clang haswell) in double and 12 ε in long double, Hurwitz ζ 114 ε (double) and 72.7 ε (long double), within its 64·|s| ε bound.
+
+**Checked and fine** (insensitive to FMA, or bit-identical, and within their bounds; worst over the four builds): the Hurwitz ζ Hermite integrand (692 ε relative to the fuzz envelope, at |Im s| up to 200, where the bound is 64·|s| ε); ζ near s = 0, 1 (3.08) and its reflection (2.5); Γ, log Γ, ψ and ψ^(m) reflection next to the poles (2, 0.756, 1.78, 4.18); log Γ near its zeros 1, 2 (0.0111); ψ near its zero 1.4616 (6.6); `erf` near 0 (0.00548); Ei near its zero 0.3725 (14.2); Lambert W near −1/e (0.499); Li_s near z = 1 (31); Y and K near integer order (7.25, 10.2); H⁽¹⁾ in the upper half plane (3.27); J near its real zeros (6.34); j_n for |z| < 1 (2.99); Ai and Bi on the negative axis, divided by |z|^{3/2} (1.06, 1.12); Γ(a, z) for a ≤ 0 (3.65); the P/Q complement near z = a (73.3 without FMA, 133 with GCC haswell, 17.7 and 28.3 after dividing by the input conditioning |z^a e^{−z}/Γ(a)/Q|); Si, Ci and Fresnel S for small z (0.933, 2.02); Legendre, Chebyshev, Laguerre and Hermite recurrences, divided by |z f′/f| (0.704, 5.95, 16.4, 3.35); `log` with a tiny vector part (0.725); `acos` and `acosh` next to 1 (1.32, 1.36); the Kahan `tan`/`tanh` formula for small x (1.31); Im f/|v| for tiny |v| for Γ, log Γ, ψ, ζ and Lambert W (15, 0.96, 40.8, 106, 1.49).
+
+**Documented limits** (not caused by FMA; identical or nearly identical in all builds):
+
+* **`log`, `log10` next to |z| = 1.** log|z| is computed as log(hypot(x, y)), which is accurate only absolutely there: up to 1.47e6 ε (`log`) and 6.8e5 ε (`log10`) relative in double, and 1.14e8 and 1.78e8 ε in long double (fuzz, 250 points, seed 20261014; 3.11e4 and 1.7e5 ε on the audit's function regions). The fuzz job lists these but does not fail them.
+* **Special functions with a tiny vector part.** For `expint`, `cyl_bessel_j` with |z| > 16, `airy_ai` and `polylog`, the vector part of f(a + |v|u) for tiny |v| is accurate to about ε·|f| absolutely, not relative to its own size (worst 4.5e15, 1.51e149, 6.3e150 and 6.45e41 ε relative to the vector part, for |v| from 10⁻¹⁵⁰ to 10⁻⁶).
+* **`comp_ellint_2` next to k = 1.** E = R_F − (k²/3)·R_D, and both terms grow like log(1/k′) while E → 1, so the subtraction loses a few bits: 46.5 ε before and after.
+* **Relative error near zeros.** Measured relative to |f| without an envelope, Ci next to its zero 0.6165 (1.79e9 ε), `assoc_legendre` (3.98e7), `hermite` (6.77e3), `cyl_hankel_2` (252), `legendre` (220), `laguerre` (211) and `chebyshev_t` (173) reach large values only at points next to zeros; these are the same in all four builds and are absolute-accuracy limits, not FMA effects.
+
+**Speed** (medians of 5 alternating runs of the old and new header, `-O3`, new/old; `bench --filter erf|ellint|atan`):
+
+| Case | GCC 14 | GCC 14 haswell | Clang 19 |
+|---|---|---|---|
+| `erf` (bench inputs), double / long double | 0.59 / 0.56 | 0.61 / 0.55 | 0.56 / 0.57 |
+| `erf(0.8+1.5i)` | 0.42 / 0.29 | 0.35 / 0.31 | 0.28 / 0.35 |
+| `erfc(0.6+0.5i)` | 0.12 / 0.08 | 0.10 / 0.08 | 0.08 / 0.09 |
+| `erfc(2.5+i)`, `erfc(0.6+5i)` (unchanged path) | 0.97–1.06 | 0.97–1.01 | 1.01–1.03 |
+| `atanh` | 0.43 / 0.45 | 0.35 / 0.44 | 0.43 / 0.42 |
+| `atan` | 0.51 / 0.47 | 0.43 / 0.49 | 0.51 / 0.47 |
+| elliptic integrals (6 cases) | 0.96–1.08 | 0.92–1.11 | 0.97–1.07 |
+
+The series is cheaper than the long continued fraction it replaces. The elliptic changes cost at most about 10% (`ellint_1` with GCC haswell, double), within the noise of the shared machine the timings come from.
 
 ## constexpr
 
