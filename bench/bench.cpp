@@ -92,6 +92,12 @@ void elementary() {
     E(asin); E(acos); E(atan); E(asinh); E(acosh); E(atanh);
 #undef E
     add<T>("elementary", "pow", in, [](const Q<T>& q) { return quat::pow(q, Q<T>(T(0.5), T(0.25), T(0), T(0.5))); });
+    // log away from and next to |q| = 1 (the double-length log|q| path covers 0.7 <= |q| <= 1.42)
+    std::vector<Q<T>> unit;
+    for (const Q<T>& q : in) unit.push_back(quat::normalize(q) * (T(1) + T(1e-3) * quat::real(q)));
+    add<T>("elementary", "log_far", around<T>(T(4)), [](const Q<T>& q) { return quat::log(q); });
+    add<T>("elementary", "log_unit", unit, [](const Q<T>& q) { return quat::log(q); });
+    add<T>("elementary", "pow_unit", unit, [](const Q<T>& q) { return quat::pow(q, Q<T>(T(0.5), T(0.25), T(0), T(0.5))); });
 }
 template <class T>
 void special() {

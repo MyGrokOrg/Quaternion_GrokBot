@@ -764,7 +764,7 @@ inline void exact_mul(T a, T b, T& p, T& e) noexcept {
         e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
     }
 }
-// log|q| for 0.7 <= |q| <= 1.42 (no overflow or harmful underflow in the squares), with
+// log|q| for 0.49 <= |q|^2 <= 2.02 (no overflow or harmful underflow in the squares), with
 // relative accuracy: (log1p s)/2 with s = a^2 + b^2 + c^2 + d^2 - 1 rounded once from its
 // exact value.  The eight parts of the exact squares and -1 are summed by repeated
 // error-free cascades (Ogita-Rump-Oishi VecSum) until the leading term carries the sum.
@@ -786,7 +786,8 @@ template <class T>
         }
         T tail = T();
         for (int i = 0; i < 8; ++i) tail += std::abs(t[i]);
-        if (tail <= eps * eps * std::abs(t[8]) || tail == T()) break;
+        // the plain sum of the remaining tail then adds at most about 8 eps^2 |s|
+        if (tail <= eps * std::abs(t[8])) break;
     }
     T lo = T();
     for (int i = 0; i < 8; ++i) lo += t[i];
@@ -921,10 +922,12 @@ template <class T>
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> log(const quaternion<T>& q) noexcept {
-    const T v = vabs(q), r = quat::abs(q);
-    // Next to |q| = 1, log(r) cancels (r carries an absolute error of ulp(1)/2); there
-    // log|q| comes from |q|^2 - 1 in double length.
-    const T lr = (r >= T(0.7) && r <= T(1.42)) ? log_abs_near1(q) : std::log(r);
+    const T v = vabs(q);
+    // Next to |q| = 1, log(abs(q)) cancels (abs(q) carries an absolute error of ulp(1)/2);
+    // there log|q| comes from |q|^2 - 1 in double length.  The plain sum of squares only
+    // selects the path (overflow gives inf and underflow 0, both outside the range).
+    const T n = q.w() * q.w() + q.x() * q.x() + q.y() * q.y() + q.z() * q.z();
+    const T lr = (n >= T(0.49) && n <= T(2.02)) ? log_abs_near1(q) : std::log(quat::abs(q));
     return along(q, v, lr, std::atan2(v, q.w()));
 }
 template <class T>
