@@ -22,7 +22,9 @@ COMMON = ["-std=c++23", "-O2"]
 def builds(arch, apple, llvm):
     # (name, compiler, extra flags, library code contracted?, must equal this build)
     b = []
-    comps = [("apple-clang", apple, [])]
+    # the toolchain's clang++ called directly needs the SDK (xcrun or CMake would add it)
+    sdk = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True, text=True).stdout.strip()
+    comps = [("apple-clang", apple, ["-isysroot", sdk] if sdk else [])]
     if llvm:
         comps.append(("llvm-clang", llvm[0], llvm[1]))
     for cname, cc, ld in comps:

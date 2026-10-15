@@ -1128,6 +1128,8 @@ template <class T> void accuracy_limits() {
         const T tol = std::is_same_v<T, float> ? base : k * base;
         const double err = static_cast<double>(abs(got - want) / abs(want)) / static_cast<double>(e);
         if (err > worst) worst = err, worst_fn = r.fn.data();
+        if (!close(got, want, tol))
+            std::printf("  %s: %.3g eps, tolerance %.3g eps\n", r.fn.data(), err, static_cast<double>(tol / e));
         qtest::check(close(got, want, tol), r.fn.data());
     }
     std::printf("  [%s] accuracy limits: worst %.3g eps (%s)\n", qtest::current_type, worst, worst_fn);

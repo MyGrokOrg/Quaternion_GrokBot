@@ -164,7 +164,12 @@ void vs_complex(QF qf, CF cf, T a, T b, T tol) {
     using W = quat::detail::sf::work_t<T>;
     const std::complex<W> z = cf(std::complex<W>(static_cast<W>(a), static_cast<W>(b)));
     const quaternion<T> want = on_axis(static_cast<T>(z.real()), static_cast<T>(z.imag()));
-    CHECK_CLOSE(qf(on_axis(a, b)), want, tol);
+    const quaternion<T> got = qf(on_axis(a, b));
+    if (!close(got, want, tol))
+        std::printf("  vs std::complex at (%g, %g): %.3g eps, tolerance %.3g eps\n", static_cast<double>(a), static_cast<double>(b),
+                    static_cast<double>(abs(got - want) / abs(want) / std::numeric_limits<T>::epsilon()),
+                    static_cast<double>(tol / std::numeric_limits<T>::epsilon()));
+    CHECK_CLOSE(got, want, tol);
 }
 
 template <class T> void inverse_functions() {
