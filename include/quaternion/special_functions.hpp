@@ -998,13 +998,24 @@ template <class T>
 
 // atanh and atan with the C99/std::complex branch cuts, written in terms of log1p
 // and cdiv (libc++'s complex<long double> versions lose precision through division).
-//   atanh z = (log1p z - log1p(-z)) / 2                       for |z| <= 1
-//   atanh z = atanh(1/z) + i copysign(pi/2, Im z)              for |z| >  1
+//   atanh z = log1p(4x / ((1 - x)^2 + y^2)) / 4                 (real part, x >= 0)
+//           + i atan2(2y, (1 - x)(1 + x) - y^2) / 2             for |x|, |y| < 2
+//   atanh z = atanh(1/z) + i copysign(pi/2, Im z)              otherwise
 //   atan  z = -i atanh(i z)
+// The real part of (log1p z - log1p(-z)) / 2 cancelled for small Re z (4.5e15 eps in the
+// vector part of atan(x + tiny v)), and through 1/z next to z = +-1 both parts inherited the
+// rounding of the division in 1 - Re(1/z) (8.5e4 eps at z = 1 - 2.5e-14 + 3.2e-7 i; 1.4e4 eps
+// at 1 + 7.2e-11 + 5.3e-10 i) before the FMA audit.  Here 1 - x is exact next to x = 1, and
+// the products are relatively accurate whether or not they are contracted into fmas.
 template <class T>
 [[nodiscard]] inline cplx<T> atanh(const cplx<T>& z) noexcept {
     if (std::isnan(z.real()) || std::isnan(z.imag())) return std::atanh(z);
-    if (std::abs(z) <= T(1)) return (log1p(z) - log1p(-z)) / T(2);
+    const T x = z.real(), y = z.imag();
+    if (std::abs(x) < T(2) && std::abs(y) < T(2)) {
+        if (std::signbit(x)) return -sf::atanh(-z);  // atanh is odd
+        const T xm = T(1) - x, d = xm * xm + y * y;
+        return {std::log1p(T(4) * x / d) / T(4), std::atan2(T(2) * y, xm * (T(1) + x) - y * y) / T(2)};
+    }
     const cplx<T> w = sf::atanh(cdiv(T(1), z));
     return {w.real(), w.imag() + std::copysign(pi<T> / T(2), z.imag())};
 }
@@ -2650,7 +2661,7 @@ template <class T>
     if (std::isnan(x)) return y == T() ? C<T>(x, y) : nn<T>();
     if (std::isnan(y)) return nn<T>();
     if (x == T() && y == T()) return {x, y};
-    return fk([](const auto& z) { return asinh(z); }, x, y, T(), T());
+    return fk([](const auto& z) { return sf::asinh(z); }, x, y, T(), T());
 }
 template <class T>
 [[nodiscard]] inline C<T> atanh(T x, T y) {
@@ -2665,7 +2676,7 @@ template <class T>
         if (x == T()) return {x, y};
         if (x == T(1)) return {inf, y};
     }
-    return fk([](const auto& z) { return atanh(z); }, x, y, T(), T());
+    return fk([](const auto& z) { return sf::atanh(z); }, x, y, T(), T());
 }
 template <class T>
 [[nodiscard]] inline C<T> acosh(T x, T y) {
@@ -2678,7 +2689,7 @@ template <class T>
     if (std::isinf(x)) return {inf, x < T() ? pi : T()};
     if (std::isnan(x)) return nn<T>();
     if (x == T() && y == T()) return {T(), pi / 2};
-    return fk([](const auto& z) { return acosh(z); }, x, y, T(), T());
+    return fk([](const auto& z) { return sf::acosh(z); }, x, y, T(), T());
 }
 template <class T>
 [[nodiscard]] inline C<T> acos(T x, T y) {
@@ -2691,7 +2702,7 @@ template <class T>
     if (std::isinf(x)) return {x < T() ? pi : T(), -inf};
     if (std::isnan(x)) return nn<T>();
     if (x == T() && y == T()) return {pi / 2, -T()};
-    return fk([](const auto& z) { return acos(z); }, x, y, T(), -T());
+    return fk([](const auto& z) { return sf::acos(z); }, x, y, T(), -T());
 }
 template <class T>
 [[nodiscard]] inline C<T> asin(T x, T y) { return mi(asinh(-y, x)); }
