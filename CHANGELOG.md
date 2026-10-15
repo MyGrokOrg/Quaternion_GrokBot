@@ -2,6 +2,14 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## MSVC /fp:contract: the headers restore the includer's fp_contract state
+
+* **Fix** (MSVC with `/fp:contract` or `/fp:fast` only; no change elsewhere, and no change to the library's results). The headers ended with `#pragma fp_contract(on)`, so a user's `#pragma fp_contract(off)` before the include was overridden for the rest of the translation unit. They now save the state with `#pragma float_control(push)` before their `fp_contract(off)` and restore it with `#pragma float_control(pop)` at their end. MSVC's `float_control` stack includes the contraction state: verified in CI on x64 (`/arch:AVX2 /fp:contract`) and ARM64 (`/fp:contract`).
+  * Before → after, `test_fpcontract`, `a * b + c` defined after the include with `fp_contract(off)` before it: fused → not fused, on both x64 and ARM64. With the command-line state or `fp_contract(on)` before the include it is fused, before and after the include, in both versions.
+  * The library's own code is still compiled without contraction: the Windows bit-identity jobs still find MSVC `/fp:contract` bit-identical to plain MSVC.
+* **Tests.** New `test_fpcontract` (`tests/test_fpcontract.cpp`, `tests/fpcontract/off.cpp`, `tests/fpcontract/on.cpp`): three translation units (state from the command line, `fp_contract(off)` and `fp_contract(on)` before the include) compare `a * b + c` defined before and after the include, bit for bit, at a = 1 + 2⁻³⁰, b = 1 − 2⁻³⁰, c = −1 (0 unfused, −2⁻⁶⁰ fused). Under MSVC it also checks that the states take effect (`fp_contract(off)` not fused; with `/fp:contract` and an fma instruction the others fused). It runs on every toolchain; there are now 10 test suites.
+* **CI.** New *windows* job *msvc ARM64 /fp:contract (Release)*; the *windows* jobs print `test_fpcontract`'s output. CI has 25 jobs (24 before).
+
 ## Wider Windows testing: /arch:AVX2, ARM64, Windows bit identity; MSVC /fp:contract fix
 
 Details are in the README section *Supported toolchains*.
