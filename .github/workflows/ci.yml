@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, log-near-one]
+    branches: [main]
   pull_request:
 
 jobs:
