@@ -93,16 +93,19 @@ def regions(fn, rng):
             x, y = polar(rng, 1e-12, 1e-2, ra)
             x += c
             tag += " near %.3g" % c
-        elif fn in ("log", "log10", "pow") and kind < 0.5:  # next to |z| = 1, anywhere on the circle
-            r = 1 + rng.choice([-1, 1]) * math.exp(rng.uniform(math.log(1e-17), math.log(1e-2)))
-            t = 0.0 if ra else rng.uniform(-math.pi, math.pi)
-            x, y = r * math.cos(t), r * math.sin(t)
-            if not ra and rng.random() < 0.25:  # x^2 + y^2 - 1 cancels beyond double length
-                x = 1 - rng.choice([1, 3, 17]) * 2.0 ** -rng.randint(26, 53)
-                y = math.sqrt((1 - x) * (1 + x)) * (1 + rng.uniform(-4e-16, 4e-16))
-            tag += " |z|~1"
         else:
             x, y = polar(rng, 1e-4, 700 if fn in ("exp", "sinh", "cosh") else 1e6, ra)
+            if fn in ("log", "log10", "pow") and kind < 0.5:  # next to |z| = 1, anywhere on the circle
+                # drawn from a generator seeded by the point above, so that the main stream (and
+                # every later function's samples at a given seed) stays as it was
+                sub = random.Random("%s %s" % (x.hex(), y.hex()))
+                r = 1 + sub.choice([-1, 1]) * math.exp(sub.uniform(math.log(1e-17), math.log(1e-2)))
+                t = 0.0 if ra else sub.uniform(-math.pi, math.pi)
+                x, y = r * math.cos(t), r * math.sin(t)
+                if not ra and sub.random() < 0.25:  # x^2 + y^2 - 1 cancels beyond double length
+                    x = 1 - sub.choice([1, 3, 17]) * 2.0 ** -sub.randint(26, 53)
+                    y = math.sqrt((1 - x) * (1 + x)) * (1 + sub.uniform(-4e-16, 4e-16))
+                tag += " |z|~1"
         if fn in ("exp", "sinh", "cosh", "sin", "cos", "tan", "tanh") and abs(x) > 700:
             x = math.copysign(700, x)
         if fn in ("sin", "cos", "tan") and abs(y) > 700: y = math.copysign(700, y)
