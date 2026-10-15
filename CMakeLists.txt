@@ -37,6 +37,16 @@ if(BUILD_TESTING AND PROJECT_IS_TOP_LEVEL)
         target_compile_options(test_constexpr PRIVATE -ffp-contract=off)
     endif()
     target_include_directories(test_bitident PRIVATE tests)
+    # The headers must leave the includer's fp_contract state unchanged (MSVC /fp:contract).
+    add_executable(test_fpcontract tests/test_fpcontract.cpp tests/fpcontract/off.cpp tests/fpcontract/on.cpp)
+    target_link_libraries(test_fpcontract PRIVATE quaternion)
+    target_include_directories(test_fpcontract PRIVATE tests)
+    if(MSVC)
+        target_compile_options(test_fpcontract PRIVATE /W4 /WX /permissive- /utf-8)
+    else()
+        target_compile_options(test_fpcontract PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Werror)
+    endif()
+    add_test(NAME fpcontract COMMAND test_fpcontract)
     # Evaluator for the nightly mpmath fuzz job (fuzz/fuzz.py, .github/workflows/fuzz.yml);
     # built with the tests so that it keeps compiling on every toolchain.
     add_executable(quaternion_fuzz_eval fuzz/fuzz_eval.cpp)

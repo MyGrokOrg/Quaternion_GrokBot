@@ -35,7 +35,8 @@
 #include <vector>
 
 #if defined(QUATERNION_MSVC_CONTRACT_OFF)
-#pragma fp_contract(off)  // see quaternion.hpp
+#pragma float_control(push)  // see quaternion.hpp
+#pragma fp_contract(off)
 #endif
 
 namespace quat {
@@ -3244,7 +3245,7 @@ template <class T>
 }  // namespace quat
 
 #if defined(QUATERNION_MSVC_CONTRACT_OFF) && !defined(QUATERNION_DIAG_NORESTORE)
-#pragma fp_contract(on)
+#pragma float_control(pop)
 #endif
 
 #endif  // QUATERNION_SPECIAL_FUNCTIONS_HPP
