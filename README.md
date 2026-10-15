@@ -51,9 +51,10 @@ cmake --install build --prefix /your/prefix     # optional
 * points exactly on the real axis, and |z| from 10⁻¹² to 400;
 * small, negative, half-integer and large (20–100) Bessel orders;
 * ζ next to s = 0 and s = 1, and Li_s with s next to an integer;
-* for the elementary functions, a tiny vector part (10⁻³⁰⁰ to 10⁻⁶, where the vector part of the result must stay relatively accurate) and points next to ±1, 0, π/2 and π.
+* for the elementary functions, a tiny vector part (10⁻³⁰⁰ to 10⁻⁶, where the vector part of the result must stay relatively accurate) and points next to ±1, 0, π/2 and π;
+* for `log`, `log10` and `pow`, points next to the whole unit circle (|z| = 1 ± 10⁻¹⁷…10⁻², a quarter of them with x² + y² − 1 cancelling beyond double length), where the real part of `log` and `log10` must also be relatively accurate on its own.
 
-Each point is put on a random axis ±i, ±j, ±k, or (for a quarter of the points) on the oblique axis (2, 3, 6)/7, which also exercises the axis reduction. The C++ evaluator `fuzz/fuzz_eval.cpp` (target `quaternion_fuzz_eval`, built with the tests) computes the values, and the script compares them with mpmath at 40 digits. The bounds are in `BOUNDS` in `fuzz/fuzz.py`: 16 ε for the elementary functions (64 ε for `pow`), 64 ε for most special functions, 16 ε for Lambert W, 128 ε for Γ(a, z) and the Airy functions, 512 ε for Li_s, 64·|s| ε for Hurwitz ζ, and 2048 ε for Bessel orders ≥ 20. They are relative, except where this README documents absolute accuracy: oscillatory J/Y/I/K/Airy near their zeros are measured against the envelope, and Hurwitz ζ(s, a) with Re a < 0 against its largest term |a + n|^−s. Results within a factor 2¹² of the largest finite value are not compared, because Bessel intermediates can overflow there first (e.g. Y_ν at ν ≈ 85, |z| ≈ 0.014, where Y ≈ 1.9e307 comes out as ±inf). Any excess fails the job and is listed with its exact hex inputs. The seed is printed and written to the job summary, and `python3 fuzz/fuzz.py --exe build/quaternion_fuzz_eval --seed S --n N` reproduces a run locally. It runs with GCC 14 (libstdc++), Clang 18 (libc++), and two FMA builds, GCC 14 and Clang 19 with `-march=haswell` (the job first checks that the runner has FMA and AVX2). `log` and `log10` next to |z| = 1 are listed in the report but not failed (see [FMA audit](#fma-audit)). A further job, *fma-audit*, runs `fuzz/fma_audit.py` (described there) and writes its tables to the job summary; it is informational and never fails.
+Each point is put on a random axis ±i, ±j, ±k, or (for a quarter of the points) on the oblique axis (2, 3, 6)/7, which also exercises the axis reduction. The C++ evaluator `fuzz/fuzz_eval.cpp` (target `quaternion_fuzz_eval`, built with the tests) computes the values, and the script compares them with mpmath at 40 digits. The bounds are in `BOUNDS` in `fuzz/fuzz.py`: 16 ε for the elementary functions (64 ε for `pow`), 64 ε for most special functions, 16 ε for Lambert W, 128 ε for Γ(a, z) and the Airy functions, 512 ε for Li_s, 64·|s| ε for Hurwitz ζ, and 2048 ε for Bessel orders ≥ 20. They are relative, except where this README documents absolute accuracy: oscillatory J/Y/I/K/Airy near their zeros are measured against the envelope, and Hurwitz ζ(s, a) with Re a < 0 against its largest term |a + n|^−s. Results within a factor 2¹² of the largest finite value are not compared, because Bessel intermediates can overflow there first (e.g. Y_ν at ν ≈ 85, |z| ≈ 0.014, where Y ≈ 1.9e307 comes out as ±inf). Any excess fails the job and is listed with its exact hex inputs. The seed is printed and written to the job summary, and `python3 fuzz/fuzz.py --exe build/quaternion_fuzz_eval --seed S --n N` reproduces a run locally. It runs with GCC 14 (libstdc++), Clang 18 (libc++), and two FMA builds, GCC 14 and Clang 19 with `-march=haswell` (the job first checks that the runner has FMA and AVX2). Every out-of-bound point fails the job; `log` and `log10` next to |z| = 1, which were listed but not failed until the fix in [log near |z| = 1](#log-near-z--1), now fail like the rest. A further job, *fma-audit*, runs `fuzz/fma_audit.py` (described there) and writes its tables to the job summary; it is informational and never fails.
 
 ```bash
 cmake -B build-bench -DCMAKE_BUILD_TYPE=Release -DQUATERNION_BUILD_BENCHMARKS=ON
@@ -130,7 +131,7 @@ Write `q = a + u·θ`, where `u` is the unit vector of `q` and θ = ‖v‖. Eve
 | Function | Definition |
 |---|---|
 | `exp(q)` | `eᵃ (cos θ + u sin θ)` |
-| `log(q)` | `ln‖q‖ + u·arg(q)` (principal branch) |
+| `log(q)` | `ln‖q‖ + u·arg(q)` (principal branch). For 0.49 ≤ ‖q‖² ≤ 2.02, ln‖q‖ = ½·log1p(‖q‖² − 1) with ‖q‖² − 1 summed in double length, so it stays relatively accurate next to ‖q‖ = 1 (see [log near \|z\| = 1](#log-near-z--1)). |
 | `log10(q)` | `log(q)/ln 10` |
 | `sqrt(q)` | Principal root (real part ≥ 0) |
 | `pow(q, int n)` | Repeated squaring (`constexpr`). Negative `n` gives the inverse. |
@@ -377,7 +378,7 @@ After the fixes, all four fuzz builds (GCC 14, Clang 18 with libc++, GCC 14 and 
 
 **Documented limits** (not caused by FMA; identical or nearly identical in all builds):
 
-* **`log`, `log10` next to |z| = 1.** log|z| is computed as log(hypot(x, y)), which is accurate only absolutely there: up to 1.47e6 ε (`log`) and 6.8e5 ε (`log10`) relative in double, and 1.14e8 and 1.78e8 ε in long double (fuzz, 250 points, seed 20261014; 3.11e4 and 1.7e5 ε on the audit's function regions). The fuzz job lists these but does not fail them.
+* **`log`, `log10` next to |z| = 1** (fixed since; see [log near |z| = 1](#log-near-z--1)). log|z| was computed as log(hypot(x, y)), which is accurate only absolutely there: up to 1.47e6 ε (`log`) and 6.8e5 ε (`log10`) relative in double, and 1.14e8 and 1.78e8 ε in long double (fuzz, 250 points, seed 20261014; 3.11e4 and 1.7e5 ε on the audit's function regions). The fuzz job listed these but did not fail them.
 * **Special functions with a tiny vector part.** For `expint`, `cyl_bessel_j` with |z| > 16, `airy_ai` and `polylog`, the vector part of f(a + |v|u) for tiny |v| is accurate to about ε·|f| absolutely, not relative to its own size (worst 4.5e15, 1.51e149, 6.3e150 and 6.45e41 ε relative to the vector part, for |v| from 10⁻¹⁵⁰ to 10⁻⁶).
 * **`comp_ellint_2` next to k = 1.** E = R_F − (k²/3)·R_D, and both terms grow like log(1/k′) while E → 1, so the subtraction loses a few bits: 46.5 ε before and after.
 * **Relative error near zeros.** Measured relative to |f| without an envelope, Ci next to its zero 0.6165 (1.79e9 ε), `assoc_legendre` (3.98e7), `hermite` (6.77e3), `cyl_hankel_2` (252), `legendre` (220), `laguerre` (211) and `chebyshev_t` (173) reach large values only at points next to zeros; these are the same in all four builds and are absolute-accuracy limits, not FMA effects.
@@ -395,6 +396,61 @@ After the fixes, all four fuzz builds (GCC 14, Clang 18 with libc++, GCC 14 and 
 | elliptic integrals (6 cases) | 0.96–1.08 | 0.92–1.11 | 0.97–1.07 |
 
 The series is cheaper than the long continued fraction it replaces. The elliptic changes cost at most about 10% (`ellint_1` with GCC haswell, double), within the noise of the shared machine the timings come from.
+
+## log near |z| = 1
+
+`log` used to compute ln‖q‖ as log(abs(q)). Next to ‖q‖ = 1 that cancels: abs(q) carries a rounding error of up to ulp(1)/2, so ln‖q‖ was accurate only absolutely (about 1e-16), not relative to its own size. For q = 0.99999999999999556 + 2⁻²³i, for example, the result was 0 instead of 2.52e-29.
+
+**Method.** For a finite q with a nonzero vector part and 0.49 ≤ ‖q‖² ≤ 2.02 (tested on the plain sum of squares), ln‖q‖ = ½·log1p(s) with s = a² + b² + c² + d² − 1:
+
+* each square is split exactly into p + e: with `std::fma` where the build has hardware FMA (`FP_FAST_FMA`, `__FMA__`, `__AVX2__`, AArch64 or ARM64; there the compiler may also contract Dekker's split, which would break it), and with Dekker's split otherwise and for x87 `long double` (which has no FMA instruction to contract into), so the same code serves GCC, Clang, MSVC and clang-cl;
+* the eight parts and −1 are summed by repeated error-free cascades (Ogita, Rump and Oishi's VecSum) until the remaining tail is below ε·|s|, usually after two passes, so s is rounded essentially once from its exact value however deep the cancellation;
+* `log10` is this result divided by ln 10, as before.
+
+Outside that range, and for real, zero, infinite or NaN arguments, nothing changed. The path is not `constexpr` (the transcendental functions are not; see [constexpr](#constexpr)), and on Windows the vector norm still comes from `vnorm3`.
+
+**Which results change.** Only for a finite q with a nonzero vector part and 0.49 ≤ ‖q‖² ≤ 2.02 (on the `i` axis, the same as the corresponding `std::complex` arguments):
+
+* `log(q)` and `log10(q)`: the real part only, by at most about ε absolutely (the old absolute error; relative to the result, the before figures below). The vector part is bit-identical (checked on 200,000 random quaternions with 0.5 ≤ ‖q‖ ≤ 2, double and long double). In the 20,000-point check below 19,980 of 20,000 points differ in their bits in at least one of float, double and long double.
+* `pow(q, x)`, `pow(q, p)`, `pow(q, complex)` and `pow(complex, p)`, for such a base: every component, because exp(p·log q) inherits the new real part, by about |p|·ε relative. 11,373 of 20,000 results differ for p in [−4, 4], and 17,986 of 20,000 for |p| from 10 to 1000. A real base (`pow(T x, p)`, or a quaternion with zero vector part), `pow(q, int)` and every other function are unchanged; no other function in the library calls `log` or `pow`. The other rows of the seed-20261014 fuzz report are identical.
+* The bit-identity goldens (`tests/bitident`) cover only the transcendental-free operations, so they and the haswell bit-identity job are unchanged; no hash needed updating.
+
+**Accuracy** (worst relative error in ε, before → after):
+
+| Check | Type | `log` | `log10` |
+|---|---|---|---|
+| Fuzz, seed 20261014, 250 points per function and type, `fuzz.py` before the new region | double | 1.47e6 → 0.907 | 6.8e5 → 1.26 |
+| | long double | 1.14e8 → 1.14 | 1.78e8 → 1.28 |
+| Fuzz, same seed and size, with the new \|z\|~1 region (real part checked on its own) | double | 4.5e15 → 0.907 | 4.5e15 → 1.26 |
+| | long double | 9.22e18 → 1.14 | 9.22e18 → 1.36 |
+| `fuzz/log_unit_check.py log`, 20,000 points, seed 1, real part | double | 3.56e16 → 0.98 | 3.56e16 → 1.68 |
+| | long double | 9.22e18 → 1.84 | 9.22e18 → 2.09 |
+| | float | 8.35e8 → 0.998 | 8.35e8 → 1.26 |
+
+The fuzz figures are the same in all four fuzz builds (GCC 14, Clang 18 with libc++, GCC 14 and Clang 19 with `-march=haswell`), and the `log_unit_check.py` figures are the same with GCC 14 (with and without `-march=haswell`), Clang 19 `-march=haswell` and Clang 18 with libc++. With the new region, the fuzz job at seed 20261014 went from 137 failures with the old header to 0. `fuzz/log_unit_check.py` draws quaternions with ‖q‖ = 1 ± 10⁻¹⁷…10⁻¹ in random 4D directions (a quarter complex, a quarter with a dominant real part), and ‖q‖ = 10^±0.15, half of those complex points whose x² + y² − 1 cancels beyond double length; its evaluator is `fuzz/log_unit_eval.cpp` (build command in the file). `test_math` checks five such points against mpmath to 4 ε in double and long double; 22 of those checks fail with the old header.
+
+**pow** (`fuzz/log_unit_check.py pow`, 20,000 points, the same ‖q‖ distribution; worst normwise relative error, and in brackets the relative error of ‖q^p‖, before → after):
+
+| p | double | long double |
+|---|---|---|
+| uniform in [−4, 4], seed 5 | 20.3 → 20.3 (4.23 → 1.71) | 22.1 → 22.2 (3.42 → 2.98) |
+| ±10^U(1, 3), seed 6 | 5.38e3 → 5.33e3 (702 → 266) | 4.78e3 → 4.78e3 (713 → 311) |
+
+The normwise error of `pow` is dominated by the angle p·arg q, which the change does not touch, so the worst cases stay; the modulus ‖q^p‖ = e^{p·ln‖q‖} is now as accurate as the product p·ln‖q‖ allows. In the fuzz job (bound 64 ε) `pow` stays at 16 ε in double and 21.4 ε in long double.
+
+**Speed** (`bench --filter elementary/log`, `elementary/pow`, `elementary/exp/`; medians of 5 alternating runs of the old and new header, `-O3`, new/old). `log_far` is the bench inputs scaled by 4 (unchanged path), `log_unit` and `pow_unit` the bench inputs moved next to ‖q‖ = 1; the plain bench inputs have 4 of 6 points in the new range.
+
+| Case, double / long double | GCC 14 | GCC 14 haswell | Clang 19 |
+|---|---|---|---|
+| `log` | 0.90 / 0.95 | 0.85 / 0.88 | 0.98 / 0.90 |
+| `log10` | 0.93 / 0.87 | 0.89 / 0.85 | 0.95 / 0.90 |
+| `log_unit` | 0.97 / 0.90 | 0.85 / 0.87 | 0.88 / 0.97 |
+| `log_far` (unchanged path) | 0.97 / 1.04 | 1.01 / 1.00 | 1.05 / 1.01 |
+| `pow` | 0.91 / 0.99 | 0.89 / 0.95 | 0.99 / 0.94 |
+| `pow_unit` | 1.00 / 0.97 | 0.89 / 0.93 | 0.98 / 0.95 |
+| `exp` (unchanged code, for comparison) | 1.41 / 0.96 | 1.01 / 0.97 | 0.98 / 1.01 |
+
+The new path is slightly faster than before because it skips abs(q), whose three `hypot` calls cost more than the exact squares, two cascades and `log1p`: GCC 14 double `log` 61.0 → 54.9 ns, `log_unit` 59.2 → 57.2 ns. A first version that iterated the cascades to ε²·|s| was 1.8–2.9× slower on these cases. The unchanged `exp` code shows the noise of the shared machine (1.41 with GCC 14 in double).
 
 ## constexpr
 
