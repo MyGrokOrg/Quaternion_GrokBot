@@ -93,6 +93,14 @@ def regions(fn, rng):
             x, y = polar(rng, 1e-12, 1e-2, ra)
             x += c
             tag += " near %.3g" % c
+        elif fn in ("log", "log10", "pow") and kind < 0.5:  # next to |z| = 1, anywhere on the circle
+            r = 1 + rng.choice([-1, 1]) * math.exp(rng.uniform(math.log(1e-17), math.log(1e-2)))
+            t = 0.0 if ra else rng.uniform(-math.pi, math.pi)
+            x, y = r * math.cos(t), r * math.sin(t)
+            if not ra and rng.random() < 0.25:  # x^2 + y^2 - 1 cancels beyond double length
+                x = 1 - rng.choice([1, 3, 17]) * 2.0 ** -rng.randint(26, 53)
+                y = math.sqrt((1 - x) * (1 + x)) * (1 + rng.uniform(-4e-16, 4e-16))
+            tag += " |z|~1"
         else:
             x, y = polar(rng, 1e-4, 700 if fn in ("exp", "sinh", "cosh") else 1e6, ra)
         if fn in ("exp", "sinh", "cosh", "sin", "cos", "tan", "tanh") and abs(x) > 700:
@@ -161,10 +169,10 @@ def regions(fn, rng):
     raise KeyError(fn)
 
 
-# Known accuracy limits that do not depend on FMA contraction (FMA audit): reported in
-# the summary, not failed.  log/log10 near |z| = 1 compute log|z| as log(hypot) and are
-# absolutely (not relatively) accurate there (log|z| = log(hypot(x, y)) cancels; see README).
-KNOWN = {("log", "complex near 1"), ("log10", "complex near 1")}
+# Known accuracy limits that do not depend on FMA contraction: reported in the summary, not
+# failed.  Empty: log/log10 next to |z| = 1 were listed here until log|z| was computed from
+# |z|^2 - 1 in double length (see "log near |z| = 1" in the README); they now fail like the rest.
+KNOWN = set()
 
 ELEMENTARY = ("exp", "log", "log10", "sqrt", "pow", "sin", "cos", "tan", "sinh", "cosh", "tanh",
               "asin", "acos", "atan", "asinh", "acosh", "atanh")
@@ -323,6 +331,10 @@ def main():
                 # (f(x + iy) ~ f(x) + i f'(x) y) relatively accurate
                 # (relative down to the smallest normal of T; subnormals are absolute)
                 err = max(err, float(abs(im - mp.im(ref)) / max(abs(mp.im(ref)), RANGE[t][0]) / eps))
+            if "|z|~1" in tag and fn in ("log", "log10") and err != float("inf") and mp.re(ref) != 0:
+                # next to |z| = 1 the real part log|z| is tiny beside arg z: check it on its own
+                # (relative down to the smallest normal of T, as above)
+                err = max(err, float(abs(re - mp.re(ref)) / max(abs(mp.re(ref)), RANGE[t][0]) / eps))
             b = bound(fn, p1, x, y, tag)
             w = worst.get(fn)
             if w is None or err > w[0]:
