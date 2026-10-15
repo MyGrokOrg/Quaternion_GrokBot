@@ -30,9 +30,22 @@ jobs:
         compiler:
           - { name: gcc-14, cxx: g++-14, flags: "" }
           - { name: clang-18-libcxx, cxx: clang++-18, flags: "-stdlib=libc++" }
+          # FMA builds: -march=haswell lets both compilers contract a*b+c into fma (gcc by
+          # default, clang with its default -ffp-contract=on); see "FMA audit" in the README.
+          - { name: gcc-14-haswell, cxx: g++-14, flags: "-march=haswell" }
+          - { name: clang-19-haswell, cxx: clang++-19, flags: "-march=haswell", llvm: 19 }
     name: fuzz (${{ matrix.compiler.name }})
     steps:
       - uses: actions/checkout@v5
+      - name: Check the CPU has FMA/AVX2
+        if: contains(matrix.compiler.flags, 'haswell')
+        run: grep -qw fma /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo
+      - name: Install clang from apt.llvm.org
+        if: matrix.compiler.llvm
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ matrix.compiler.llvm }}
       - name: Install libc++ and mpmath
         run: |
           if [[ "${{ matrix.compiler.flags }}" == *libc++* ]]; then
@@ -54,3 +67,41 @@ jobs:
         with:
           name: fuzz-report-${{ matrix.compiler.name }}
           path: fuzz-report.md
+
+  # Informational: the same stress points through non-FMA and FMA builds of gcc and clang,
+  # all compared with mpmath (fuzz/fma_audit.py); the table goes to the job summary.
+  fma-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the CPU has FMA/AVX2
+        run: grep -qw fma /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo
+      - name: Install clang 19 and mpmath
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 19
+          python3 -m pip install --user mpmath==1.3.0
+      - name: Build evaluators
+        run: |
+          for c in g++-14 clang++-19; do
+            $c -std=c++23 -O2 -Iinclude fuzz/fuzz_eval.cpp -o fe-$c &
+            $c -std=c++23 -O2 -march=haswell -Iinclude fuzz/fuzz_eval.cpp -o fe-$c-hsw &
+          done
+          wait
+      - name: Audit
+        run: |
+          seed="${{ github.event.inputs.seed }}"
+          exes="--exe gcc=fe-g++-14 --exe gcc-hsw=fe-g++-14-hsw --exe clang=fe-clang++-19 --exe clang-hsw=fe-clang++-19-hsw"
+          # targeted near-equal-subtraction sites, then every function on the fuzz regions
+          python3 fuzz/fma_audit.py --sites $exes --n 150 --seed "${seed:-$GITHUB_RUN_ID}" --report fma-sites.md
+          python3 fuzz/fma_audit.py $exes --n 150 --seed "${seed:-$GITHUB_RUN_ID}" --report fma-functions.md
+          cat fma-sites.md fma-functions.md > fma-audit.md
+          cat fma-audit.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fma-audit
+          path: fma-audit.md

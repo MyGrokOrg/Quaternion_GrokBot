@@ -27,6 +27,11 @@ RANGE = {"double": (mp.mpf(2) ** (-1022 + 64), mp.mpf(2) ** 1012),
 
 # Bounds in eps, from README.md (accuracy tables) with headroom; (bound, note).
 BOUNDS = {
+    # elementary functions (quaternion.hpp); README: a few ulp.  The "abs" variants are
+    # measured against max(|f|, envelope) where the documented accuracy is absolute.
+    "exp": 16, "log": 16, "log10": 16, "sqrt": 16, "pow": 64, "sin": 16, "cos": 16, "tan": 16,
+    "sinh": 16, "cosh": 16, "tanh": 16, "asin": 16, "acos": 16, "atan": 16, "asinh": 16,
+    "acosh": 16, "atanh": 16,
     "tgamma": 64, "lgamma": 64, "digamma": 64, "erf": 64, "erfc": 64,
     "riemann_zeta": 64, "hurwitz_zeta": None,  # 64 * max(1, |s|): conditioning ~ |s|
     "polylog": 512, "lambert_w": 16, "expint": 64, "expint_n": 64, "tgamma_upper": 128,
@@ -77,6 +82,27 @@ def regions(fn, rng):
     """Yield (p1, p2, x, y, tag) samples for fn."""
     ra = rng.random() < 0.25  # exactly on the real axis
     tag = "real-axis" if ra else "complex"
+    if fn in ELEMENTARY:
+        kind = rng.random()
+        if kind < 0.2:  # tiny vector part: Im f / |v| in the axis reduction
+            x, _ = polar(rng, 1e-3, 30, True)
+            y = math.exp(rng.uniform(math.log(1e-300), math.log(1e-6)))
+            tag = "tiny |v|"
+        elif kind < 0.35:  # next to the branch points / 1 / zeros
+            c = rng.choice([1.0, -1.0, 0.0, math.pi, math.pi / 2])
+            x, y = polar(rng, 1e-12, 1e-2, ra)
+            x += c
+            tag += " near %.3g" % c
+        else:
+            x, y = polar(rng, 1e-4, 700 if fn in ("exp", "sinh", "cosh") else 1e6, ra)
+        if fn in ("exp", "sinh", "cosh", "sin", "cos", "tan", "tanh") and abs(x) > 700:
+            x = math.copysign(700, x)
+        if fn in ("sin", "cos", "tan") and abs(y) > 700: y = math.copysign(700, y)
+        if ra:  # stay off the branch cuts on the real axis
+            if fn in ("log", "log10", "sqrt", "pow"): x = abs(x)
+            if fn in ("asin", "acos", "atanh") and abs(x) > 1: x = math.copysign(rng.uniform(0, 1), x)
+            if fn == "acosh" and x < 1: x = 1 + abs(x)
+        return (rng.uniform(-4, 4) if fn == "pow" else 0), 0, x, y, tag
     if fn == "tgamma":
         x, y = box(rng, (-30, 30), (0, 0) if ra else (-30, 30)); return 0, 0, x, y, tag
     if fn in ("lgamma", "digamma"):
@@ -135,17 +161,28 @@ def regions(fn, rng):
     raise KeyError(fn)
 
 
+# Known accuracy limits that do not depend on FMA contraction (FMA audit): reported in
+# the summary, not failed.  log/log10 near |z| = 1 compute log|z| as log(hypot) and are
+# absolutely (not relatively) accurate there (log|z| = log(hypot(x, y)) cancels; see README).
+KNOWN = {("log", "complex near 1"), ("log10", "complex near 1")}
+
+ELEMENTARY = ("exp", "log", "log10", "sqrt", "pow", "sin", "cos", "tan", "sinh", "cosh", "tanh",
+              "asin", "acos", "atan", "asinh", "acosh", "atanh")
+
+
 def reference(fn, p1, x, y):
     z = mp.mpc(x, y) if y != 0 else mp.mpf(x)
+    if fn in ELEMENTARY:
+        zc = mp.mpc(x, y)  # complex functions on the upper side (y >= 0) of every cut
+        if fn == "pow": return mp.power(zc, p1)
+        f = {"log10": mp.log10}.get(fn) or getattr(mp, fn)
+        # mpmath loses a tiny imaginary part to cancellation (e.g. atan's log formula):
+        # carry enough extra bits to resolve it.
+        extra = 64 + (max(0, -int(mp.floor(mp.log(abs(y), 2)))) if y != 0 else 0)
+        with mp.workprec(mp.mp.prec + extra):
+            return +f(zc)
     if fn == "tgamma": return mp.gamma(z)
     if fn == "lgamma": return mp.loggamma(z)
-    if fn == "expint":  # absolute next to the real zero of Ei (x = 0.3725...)
-        s = max(s, min(mp.mpf(1), abs(mp.exp(z)) / 8))
-    if fn == "hurwitz_zeta" and x < 0:
-        # Left of 0, zeta(s, a) has real zeros where the terms (a + n)^-s with a + n < 0
-        # cancel; the accuracy there is relative to the largest such term.
-        n_max = int(mp.ceil(-x)) + 1
-        s = max(s, max(abs(mp.power(z + n, -p1)) for n in range(n_max + 1) if z + n != 0))
     if fn == "digamma": return mp.digamma(z)
     if fn == "erf": return mp.erf(z)
     if fn == "erfc": return mp.erfc(z)
@@ -208,6 +245,11 @@ def envelope(fn, p1, x, y, ref):
         s = max(s, min(mp.mpf(1), abs(mp.exp(z)) / 8))
     if fn == "digamma":
         s = max(s, mp.mpf(1))
+    if fn == "hurwitz_zeta" and x < 0:
+        # Left of 0 (Re s < 0), zeta(s, a) has real zeros where the growing terms
+        # (a + n)^-s cancel; the accuracy there is relative to the largest such term.
+        n_max = int(mp.ceil(-x)) + 1
+        s = max(s, max(abs(mp.power(p1 + n, -z)) for n in range(n_max + 1)))
     if fn == "erf":  # absolute next to the zeros of erf off the axes
         s = max(s, min(abs(mp.erfc(z)), 1))
     if fn == "erfc":
@@ -244,8 +286,14 @@ def main():
             axis = rng.choice([1, 2, 3, -1, -2, -3]) if y != 0 else 1
             if y < 0:  # the lift needs b >= 0 on the chosen axis; reverse the axis instead
                 y, axis = -y, -axis
+            if y != 0 and rng.random() < 0.25:
+                # oblique axis (2, 3, 6)/7: vector part (2c, 3c, 6c) with |v| = 7c exactly
+                m, e = math.frexp(y / 7)
+                c = math.ldexp(round(m * 2 ** 40) / 2 ** 40, e)
+                if c > 0 and 7 * c / 7 == c:
+                    y, axis = 7 * c, 4 if axis > 0 else -4
             samples.append((fn, float(p1), float(p2), float(x), float(y), axis, tag))
-    rows, failures = [], []
+    rows, failures, known = [], [], []
     t0 = time.time()
     refs = {}
     for t in a.types.split(","):
@@ -270,11 +318,18 @@ def main():
             re, im = (H(v) for v in line.split())
             got = mp.mpc(re, im)
             err = float(abs(got - ref) / sc / eps) if mp.isfinite(re) and mp.isfinite(im) else float("inf")
+            if "tiny |v|" in tag and err != float("inf") and 0 < abs(mp.im(ref)) < abs(ref) * mp.mpf(1e-6):
+                # the axis reduction must keep a vector part that is tiny because v is tiny
+                # (f(x + iy) ~ f(x) + i f'(x) y) relatively accurate
+                # (relative down to the smallest normal of T; subnormals are absolute)
+                err = max(err, float(abs(im - mp.im(ref)) / max(abs(mp.im(ref)), RANGE[t][0]) / eps))
             b = bound(fn, p1, x, y, tag)
             w = worst.get(fn)
             if w is None or err > w[0]:
                 worst[fn] = (err, p1, x, y, tag)
-            if not err <= b:
+            if not err <= b and (fn, tag) in KNOWN:
+                known.append((t, fn, err, tag))
+            elif not err <= b:
                 failures.append((t, fn, err, b, p1, x, y, tag, re, im, ref))
         for fn in fns:
             if fn in worst:
@@ -284,6 +339,12 @@ def main():
              "| type | function | worst (eps) | bound | at p, z |", "|---|---|---|---|---|"]
     for t, fn, err, b, p1, x, y, tag in rows:
         lines.append("| %s | %s | %.3g | %g | p=%r, z=%r%s%ri (%s) |" % (t, fn, err, b, p1, x, "+" if float(y) >= 0 else "", y, tag))
+    if known:
+        lines += ["", "## %d out-of-bound point(s) at known non-FMA limits (not failed)" % len(known), ""]
+        kw = {}
+        for t, fn, err, tag in known:
+            kw[(t, fn, tag)] = max(kw.get((t, fn, tag), 0), err)
+        lines += ["* %s %s [%s]: worst %.3g eps" % (t, fn, tag, e) for (t, fn, tag), e in sorted(kw.items())]
     lines += ["", "## %d failure(s)" % len(failures), ""]
     for t, fn, err, b, p1, x, y, tag, re, im, ref in failures[:200]:
         lines.append("* %s %s(p=%s, z=%s%s%si) [%s]: %.3g eps > %g; got %s%s%si, mpmath %s" % (
