@@ -1,6 +1,7 @@
 // Constant evaluation of the transcendental-free operations (no <cmath> needed), and the
 // detail::cx helpers behind them, checked against the runtime std:: functions.
-// This target is compiled with -ffp-contract=off (CMakeLists.txt) so the helpers' error-free
+// This target is compiled with -ffp-contract=off (also under clang-cl; MSVC's /fp:contract is
+// turned off by the headers themselves; CMakeLists.txt) so the helpers' error-free
 // transformations stay exact when they are exercised at run time below.
 #include "test_framework.hpp"
 #include <cmath>

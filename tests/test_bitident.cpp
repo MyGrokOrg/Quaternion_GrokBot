@@ -2,8 +2,9 @@
 // header before the constexpr work (golden hashes in bitident/golden.inc; NaNs canonical).
 // With FMA (e.g. -march=haswell) the contraction pattern depends on the compiler and the
 // optimization level, so no golden hash is stable there; those builds are checked instead by
-// the CI job "bit-identity (haswell)", which diffs the raw bits of the old and new header
-// compiled with the same compiler and flags (tests/bitident/dump.cpp).
+// the CI jobs "bit-identity (haswell)" and "bit-identity (windows x64/arm64)", which diff the
+// raw bits of the old and new header compiled with the same compiler and flags
+// (tests/bitident/dump.cpp, tests/bitident/windows.py).
 #include "test_framework.hpp"
 #include "bitident/ops.hpp"
 #include <cstring>

@@ -2,6 +2,28 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## Wider Windows testing: /arch:AVX2, ARM64, Windows bit identity; MSVC /fp:contract fix
+
+Details are in the README section *Supported toolchains*.
+
+* **CI.** The *windows* job gained six builds: on x64 MSVC `/arch:AVX2`, MSVC `/arch:AVX2 /fp:contract` and clang-cl `/arch:AVX2` (Release; the job first checks that the CPU has AVX2), and on ARM64 (`windows-11-arm`, native) MSVC Debug and Release and clang-cl Release. New jobs *bit-identity (windows x64)* and *bit-identity (windows arm64)* (`tests/bitident/windows.py`). CI now has 24 jobs (16 before). The nightly fuzz workflow's MSVC job became a matrix of five Windows builds (double): MSVC (still named *fuzz (msvc)*), MSVC `/arch:AVX2 /fp:contract`, clang-cl `/arch:AVX2`, MSVC ARM64 and clang-cl ARM64; the workflow has 10 jobs (6 before).
+* **Results.** All 9 test suites pass in all nine Windows jobs. Fuzz at seed 20261014, 250 samples per function (double): 0 failures in all five Windows builds; every worst error within 1.37× of plain MSVC's (`expint` 9.18 vs 6.68 ε, MSVC `/arch:AVX2 /fp:contract`) and within 1.79× of GCC 14's (`log` 1.62 vs 0.907 ε at z ≈ 1.571 + 0.00057i, in all five Windows builds). This corrects the README's earlier "within 1.5× of GCC 14" for MSVC, which no longer held for `log` after the |z| = 1 change (GCC 14 went to 0.907 there; MSVC stayed at 1.62).
+* **Fix: MSVC `/fp:contract`** (no change on GCC, Clang or clang-cl, or on MSVC without `/fp:contract`). MSVC fuses multiply-adds across statements and inlined calls, e.g. the product in `two_prod` with the sum in the `fast_two_sum` that follows, which broke the double-length (`dd`) arithmetic of the special functions. Both headers now compile their own code with `#pragma fp_contract(off)` when `_M_FP_CONTRACT` is defined (MSVC `/fp:contract` and `/fp:fast`) and restore `fp_contract(on)` at their end; template instantiations keep the state of their definition (checked: the suites pass with and without the restore).
+  * Before → after, fuzz at seed 20261014, 250 samples per function, double, x64 `/arch:AVX2 /fp:contract` / ARM64 `/fp:contract`: failures 88 / 89 → 0 / 0; `cyl_bessel_j` 1.33e5 / 1.02e5 → 24.7 / 24.7 ε, `sph_bessel` 4.71e4 / 4.71e4 → 8.13 / 8.88, `riemann_zeta` 1.19e3 / 1.19e3 → 4.02 / 4.02, `cyl_bessel_j_int` 1.17e3 / 1.17e3 → 64.1 / 64.1, `cyl_bessel_i` 871 / 968 → 22.8 / 22.8, `tgamma` 60.7 / 60.6 → 2.51 / 2.51, `erfc` 28.8 / 28.8 → 4.39 / 4.39, `airy_bi` 90.4 / 209 → 32.7 / 32.7.
+  * Test suites (x64 `/arch:AVX2 /fp:contract`, Release): before, 281 failed checks in 3 suites (`test_special` 24: J_n at 15 for n = 0, 1, 3 and −2; `test_special2` 252: `tgamma`, `erf`, `erfc`, `riemann_zeta`, `cyl_bessel_j` against `std::`, the real-axis mpmath tables, Bessel near zeros; `test_constexpr` 5: the runtime error-free helpers); after, all 9 suites pass.
+  * Bit identity: with the pragma, MSVC `/fp:contract` gives the plain MSVC build's bits for the transcendental-free operations (the Linux goldens). Against the pre-constexpr header, which had no pragma, 30 of the 45 hashes differ in that build only; the Windows bit-identity job lists this and does not fail on it.
+  * MSVC `/fp:fast` stays unsupported: `test_constexpr`'s `static_assert`s do not compile with it (C2607).
+* **Found, no change needed.**
+  * MSVC does not contract with `/arch:AVX2` alone: bit-identical to plain MSVC (old and new header, all 45 hashes); with it, `exact_mul` (`log` near |z| = 1) uses `std::fma` (`__AVX2__`).
+  * clang-cl contracts by default with `/arch:AVX2` and on ARM64 (30 of 45 hashes differ from the non-contracting builds, as on Linux with `-march=haswell`; identical with `-ffp-contract=off`); old and new header still agree bit for bit, all suites pass, and fuzz is clean.
+  * The ARM64 Universal CRT's `hypot` rounds differently from the x64 one: double `abs`/`normalize` hashes `2d7f00354389fa6a`/`64940283057f2787` (new `double@ucrt-arm64` goldens); it differs from a correctly rounded `hypot` in 29,052 of 200,000 double inputs (x64: 32,576) and 370 of 200,000 float inputs (same as x64); a constexpr `abs` differs from the runtime one in 23 of 256 values (x64: 25), 1 ulp each (`test_constexpr`, seed 42). Every other hash matches the glibc goldens on ARM64.
+* **Tests.**
+  * `QTEST_FP_CONTRACT` (`tests/test_framework.hpp`) decides where the bit-exact runtime checks are skipped: `__FMA__`, or Clang on ARM64/AArch64 (was `__FMA__` only).
+  * `test_bitident`: `double@ucrt-arm64` goldens on ARM64; no unreachable code after the FMA skip (MSVC C4702 under `/WX` with `/fp:contract`).
+  * `test_constexpr` is built with `-ffp-contract=off` under clang-cl too (`/clang:-ffp-contract=off`), as already under GCC and Clang.
+  * The *windows* jobs print `test_constexpr`'s `hypot` statistics after the tests.
+* **Not tested on Windows:** sanitizers, benchmarks, MinGW, 32-bit x86, `/arch:AVX512`, ARM64EC.
+
 ## log and log10 relatively accurate next to |z| = 1 (changes log, log10 and pow results)
 
 Details are in the README section *log near |z| = 1*.
