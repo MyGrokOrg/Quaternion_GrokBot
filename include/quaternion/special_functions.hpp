@@ -207,7 +207,7 @@ template <class T>
 }
 template <class T>
 [[nodiscard]] inline dd<T> ldexp(const dd<T>& a, int e) noexcept {
-    return {std::ldexp(a.hi, e), std::ldexp(a.lo, e)};
+    return {c_scalbn(a.hi, e), c_scalbn(a.lo, e)};  // = std::ldexp (exact helper on Apple x86_64)
 }
 
 enum class ddc { ln2, pi, half_log_2pi, log_pi, two_over_sqrt_pi };

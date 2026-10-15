@@ -51,3 +51,10 @@
 // Universal CRT hypot on ARM64 Windows (MSVC and clang-cl; differs from both of the above).
 {"double@ucrt-arm64", "abs", 0x2d7f00354389fa6aULL},
 {"double@ucrt-arm64", "normalize", 0x64940283057f2787ULL},
+// macOS libm hypot (abs, normalize): macOS 15, Apple Clang 17/21 and Homebrew LLVM 22/23 with -ffp-contract=off.
+{"double@macos-arm64", "abs", 0xb5df26a5b94353dfULL},
+{"double@macos-arm64", "normalize", 0xf4c6eb01ae980eebULL},
+{"double@macos-x86_64", "abs", 0xe6ca917fe381e0daULL},
+{"double@macos-x86_64", "normalize", 0x2aaa621351e38aa0ULL},
+{"long_double@macos-x86_64", "abs", 0x2a2cdc1ea54797ecULL},
+{"long_double@macos-x86_64", "normalize", 0x5241abcaf2066dd4ULL},

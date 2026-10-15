@@ -175,7 +175,12 @@ void vs_complex(QF qf, CF cf, T a, T b, T tol) {
 template <class T> void inverse_functions() {
     using Q = quaternion<T>;
     const T tol = rtol<T>(64);
-#ifdef _LIBCPP_VERSION
+#if defined(_LIBCPP_VERSION) && defined(__APPLE__)
+    // libc++'s complex inverse functions take log(abs(w)) with |w| near 1, and macOS's libm
+    // hypot is not correctly rounded, so near 0 the reference itself is off by up to 387 eps
+    // (asinh at 0.001 + 0.002i; the quaternion result agrees with the long double reference).
+    const T ref_tol = std::is_same_v<T, float> ? tol : T(1e-12);
+#elif defined(_LIBCPP_VERSION)
     // libc++ evaluates the complex<long double> inverse functions with double-precision
     // division, so as a reference it is only good to about 1e-13.
     const T ref_tol = std::is_same_v<T, long double> ? T(1e-12) : tol;

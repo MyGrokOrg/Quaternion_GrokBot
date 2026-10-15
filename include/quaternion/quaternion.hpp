@@ -294,7 +294,14 @@ template <class T> constexpr bool c_signbit(T x) noexcept { if consteval { retur
 template <class T> constexpr T c_fabs(T x) noexcept { if consteval { return cx::fabs(x); } else { return std::abs(x); } }
 template <class T> constexpr T c_copysign(T x, T s) noexcept { if consteval { return cx::copysign(x, s); } else { return std::copysign(x, s); } }
 template <class T> constexpr T c_logb(T x) noexcept { if consteval { return cx::logb(x); } else { return std::logb(x); } }
+// Apple's x86_64 libm rounds subnormal results of scalbn/scalbnl wrongly (236 of 400,000
+// double and 76 of 400,000 long double inputs with subnormal results, macOS 15 x86_64), which
+// changed the bits of quaternion division there; it gets the exact helper at run time too.
+#if defined(__APPLE__) && (defined(__x86_64__) || defined(__i386__))
+template <class T> constexpr T c_scalbn(T x, int n) noexcept { return cx::scalbn(x, n); }
+#else
 template <class T> constexpr T c_scalbn(T x, int n) noexcept { if consteval { return cx::scalbn(x, n); } else { return std::scalbn(x, n); } }
+#endif
 template <class T> constexpr T c_hypot(T x, T y) noexcept { if consteval { return cx::hypot(x, y); } else { return std::hypot(x, y); } }
 
 // ---- C99 Annex G (G.5.1) recovery of infinities in multiplication and division ----
@@ -696,12 +703,16 @@ template <class T>
 }
 
 namespace detail {
-#if defined(_WIN32)
+// Windows and macOS: the C library's hypot is not correctly rounded (Universal CRT: 1 ulp off
+// in 32576 of 200000 double inputs in test_constexpr; macOS: 31923 on arm64, 27884 on x86_64,
+// and long double hypotl on x86_64 in 33178, some by more than 1 ulp), and every function of a
+// quaternion with |Im| = |v| large inherits |v| times that error (e.g. sinh at |v| = 109:
+// 63.8 eps on Windows).  There ||v|| is computed by vnorm3 below; glibc keeps std::hypot.
+#if defined(_WIN32) || defined(__APPLE__)
+#define QUATERNION_OWN_VNORM 1
+#endif
+#if defined(QUATERNION_OWN_VNORM)
 // sqrt(x^2 + y^2 + z^2) to within about 0.5 ulp, exact when the true value is representable.
-// Used instead of the nested std::hypot on Windows: the Universal CRT's hypot is not
-// correctly rounded (1 ulp off in 32576 of 200000 double inputs in test_constexpr), and
-// every function of a quaternion with |Im| = |v| large inherits |v| times that error (e.g.
-// sinh at |v| = 109: 63.8 eps).  glibc's and libc++'s builds keep std::hypot, unchanged.
 template <class T>
 [[nodiscard]] inline T vnorm3(T x, T y, T z) noexcept {
     using L = std::numeric_limits<T>;
@@ -717,7 +728,7 @@ template <class T>
         // Scale by 2^-e so that m is in [1, 2): no overflow, and squares of components below
         // m 2^-(digits+2) only matter beyond the last bit.
         const int e = std::ilogb(m);
-        x = std::scalbn(x, -e); y = std::scalbn(y, -e); z = std::scalbn(z, -e);
+        x = c_scalbn(x, -e); y = c_scalbn(y, -e); z = c_scalbn(z, -e);
         // Exact squares (Dekker), their sum in double-length, one Newton correction.
         const auto sq = [](T a, T& p, T& err) {
             constexpr T split = T((std::uint64_t(1) << ((L::digits + 1) / 2)) + 1);
@@ -740,13 +751,13 @@ template <class T>
         T hp, he;
         sq(h, hp, he);
         const T r = ((s2 - hp) - he + lo) / (T(2) * h);
-        return std::scalbn(h + r, e);
+        return c_scalbn(h + r, e);
     }
 }
 #endif
 template <class T>
 [[nodiscard]] inline T vabs(const quaternion<T>& q) noexcept {
-#if defined(_WIN32)
+#if defined(QUATERNION_OWN_VNORM)
     return vnorm3(q.x(), q.y(), q.z());
 #else
     // Nested two-argument hypot: libc++ 18's three-argument std::hypot squares its

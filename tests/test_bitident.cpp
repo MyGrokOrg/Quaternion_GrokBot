@@ -18,7 +18,8 @@ struct golden { const char* type; const char* op; std::uint64_t hash; };
 
 // abs and normalize call the C library's hypot.  The goldens are glibc's; the Universal CRT
 // (MSVC, clang-cl) rounds hypot differently, so Windows has its own hashes for those two
-// ("<type>@ucrt" entries in golden.inc; "<type>@ucrt-arm64" on ARM64).
+// ("<type>@ucrt" entries in golden.inc; "<type>@ucrt-arm64" on ARM64), and so does macOS's
+// libm ("<type>@macos-arm64", "<type>@macos-x86_64").
 [[maybe_unused]] static bool uses_libm_hypot(const std::string& op) { return op == "abs" || op == "normalize"; }
 
 template <class T>
@@ -28,10 +29,15 @@ void check(const char* tname) {
     for (const auto& [name, h] : bitident::run<T>(true)) {
         bool found = false;
         std::string type = tname;
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__APPLE__)
         // (float abs/normalize match glibc's hashes, so only double has @ucrt entries.)
         // The ARM64 build of the Universal CRT rounds hypot differently again ("@ucrt-arm64").
-#if defined(_M_ARM64)
+        // macOS: "@macos-arm64" (double) and "@macos-x86_64" (double and long double).
+#if defined(__APPLE__) && defined(__aarch64__)
+        const char* crt = "@macos-arm64";
+#elif defined(__APPLE__)
+        const char* crt = "@macos-x86_64";
+#elif defined(_M_ARM64)
         const char* crt = "@ucrt-arm64";
 #else
         const char* crt = "@ucrt";

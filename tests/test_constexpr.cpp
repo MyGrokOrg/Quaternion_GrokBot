@@ -115,11 +115,16 @@ template <class T> void constexpr_vs_runtime() {
     // abs: std::hypot (libm) at run time vs a correctly rounded hypot in constant evaluation.
     // Each difference is at most 1 ulp.  glibc's hypot differs from the correctly rounded one
     // rarely (<= 16 of these 256); the Universal CRT's (Windows) far more often.
+    // macOS: also more often (libm hypot), and x86_64 hypotl by more than 1 ulp at times.
+#if defined(__APPLE__) && !defined(__aarch64__)
+    if (!std::is_same_v<T, long double>) CHECK(abs_far == 0);
+#else
     CHECK(abs_far == 0);
-#if !defined(_WIN32)
+#endif
+#if !defined(_WIN32) && !defined(__APPLE__)
     CHECK(abs_diff <= 16);
 #endif
-    if (abs_diff) std::printf("  [%s] constexpr abs differs from runtime in %d of 256\n", qtest::current_type, abs_diff);
+    if (abs_diff) std::printf("  [%s] constexpr abs differs from runtime in %d of 256 (%d by more than 1 ulp)\n", qtest::current_type, abs_diff, abs_far);
 }
 TEST(constexpr_matches_runtime) { FOR_EACH_TYPE(constexpr_vs_runtime); }
 
