@@ -24,6 +24,17 @@
 #include <type_traits>
 #include <utility>
 
+// MSVC with /fp:contract or /fp:fast (both define _M_FP_CONTRACT) fuses a * b + c into an fma
+// across statements and inlined calls, e.g. the product inside two_prod with the sum that
+// follows it in fast_two_sum.  That breaks the error-free transformations (double-length
+// arithmetic, exact squares) the library relies on, so the library's own functions are
+// compiled with contraction off there; the pragma is restored at the end of each header.
+// Explicit std::fma calls are unaffected.  GCC and Clang (including clang-cl) need nothing.
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_FP_CONTRACT)
+#define QUATERNION_MSVC_CONTRACT_OFF 1
+#pragma fp_contract(off)
+#endif
+
 #define QUATERNION_VERSION_MAJOR 1
 #define QUATERNION_VERSION_MINOR 0
 #define QUATERNION_VERSION_PATCH 0
@@ -1454,5 +1465,9 @@ public:
         return out;
     }
 };
+
+#if defined(QUATERNION_MSVC_CONTRACT_OFF) && !defined(QUATERNION_DIAG_NORESTORE)
+#pragma fp_contract(on)
+#endif
 
 #endif  // QUATERNION_QUATERNION_HPP

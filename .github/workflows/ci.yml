@@ -82,7 +82,12 @@ jobs:
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} -j
       - name: Test
-        run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure
+        run: |
+          ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # informational: how often the C library's hypot differs from a correctly rounded one
+          & build/${{ matrix.build_type }}/test_constexpr.exe | Select-String 'hypot|differs'
+          & build/${{ matrix.build_type }}/test_bitident.exe | Select-String 'FMA build'
       - name: Install
         run: cmake --install build --config ${{ matrix.build_type }} --prefix ${{ runner.temp }}/install
 

@@ -34,6 +34,10 @@
 #include <type_traits>
 #include <vector>
 
+#if defined(QUATERNION_MSVC_CONTRACT_OFF)
+#pragma fp_contract(off)  // see quaternion.hpp
+#endif
+
 namespace quat {
 
 namespace detail::sf {
@@ -3238,5 +3242,9 @@ template <class T>
 #undef QUAT_SF_C
 
 }  // namespace quat
+
+#if defined(QUATERNION_MSVC_CONTRACT_OFF) && !defined(QUATERNION_DIAG_NORESTORE)
+#pragma fp_contract(on)
+#endif
 
 #endif  // QUATERNION_SPECIAL_FUNCTIONS_HPP

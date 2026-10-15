@@ -1,0 +1,19 @@
+name: diag (temporary)
+on:
+  push:
+    branches: [win-wide]
+jobs:
+  fpc:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        v: ["/arch:AVX2 /fp:contract", "/arch:AVX2 /fp:contract /DQUATERNION_DIAG_NORESTORE", "/arch:AVX2 /fp:fast"]
+    name: diag (${{ matrix.v }})
+    env:
+      CXXFLAGS: ${{ matrix.v }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: cmake -B build -A x64
+      - run: cmake --build build --config Release -j
+      - run: ctest --test-dir build -C Release --output-on-failure
