@@ -203,7 +203,7 @@ template <class T>
     return {std::ldexp(a.hi, e), std::ldexp(a.lo, e)};
 }
 
-enum class ddc { ln2, pi, half_log_2pi, log_pi };
+enum class ddc { ln2, pi, half_log_2pi, log_pi, two_over_sqrt_pi };
 // Constants split as hi + lo for 64-bit (x87) and 53-bit significands.
 template <class T>
 [[nodiscard]] inline dd<T> dd_const(ddc c) noexcept {
@@ -213,6 +213,7 @@ template <class T>
             case ddc::pi: return {T(0xc90fdaa22168c235p-62L), T(-0xece675d1fc8f8cbbp-128L)};
             case ddc::half_log_2pi: return {T(0xeb3f8e4325f5a535p-64L), T(-0x1ad0dbffaef9b7f7p-126L)};
             case ddc::log_pi: return {T(0x928682473d0de85fp-63L), T(-0x140d5272af7816cdp-125L)};
+            case ddc::two_over_sqrt_pi: return {T(0x906eba8214db688dp-63L), T(0x71d48a7f6bfec344p-127L)};
         }
     } else if constexpr (std::numeric_limits<T>::digits == 53) {
         switch (c) {
@@ -220,6 +221,7 @@ template <class T>
             case ddc::pi: return {T(0x1.921fb54442d18p+1), T(0x1.1a62633145c07p-53)};
             case ddc::half_log_2pi: return {T(0x1.d67f1c864beb5p-1), T(-0x1.65b5a1b7ff5dfp-55)};
             case ddc::log_pi: return {T(0x1.250d048e7a1bdp+0), T(0x1.7abf2ad8d5088p-57)};
+            case ddc::two_over_sqrt_pi: return {T(0x1.20dd750429b6dp+0), T(0x1.1ae3a914fed80p-56)};
         }
     }
     // Other formats: no extra precision.
@@ -227,6 +229,7 @@ template <class T>
         case ddc::ln2: return {std::log(T(2)), T()};
         case ddc::pi: return {pi<T>, T()};
         case ddc::half_log_2pi: return {T(0.5) * std::log(T(2) * pi<T>), T()};
+        case ddc::two_over_sqrt_pi: return {T(2) / std::sqrt(pi<T>), T()};
         default: return {std::log(pi<T>), T()};
     }
 }
@@ -515,7 +518,7 @@ template <class T>
 // terms, so z^2, the terms and the sum are carried in double-T; otherwise the
 // rounding of z^2 and of each term would accumulate to ~|z|^2 eps.
 template <class T>
-[[nodiscard]] inline cplx<T> erf_series(const cplx<T>& z) noexcept {
+[[nodiscard]] inline cdd<T> erf_series_dd(const cplx<T>& z) noexcept {
     const T x = z.real(), y = z.imag();
     const cdd<T> mw{-(two_prod(x, x) - two_prod(y, y)), -(two_prod(x, y) * T(2))};
     cdd<T> term = to_cdd(z), sum = term;
@@ -528,7 +531,28 @@ template <class T>
         sum = sum + t;
         if (std::hypot(t.re.hi, t.im.hi) <= eps<T>() * eps<T>() * std::hypot(sum.re.hi, sum.im.hi)) break;
     }
-    return to_cplx(sum) * (T(2) / std::sqrt(pi<T>));
+    return sum * dd_const<T>(ddc::two_over_sqrt_pi);
+}
+template <class T>
+[[nodiscard]] inline cplx<T> erf_series(const cplx<T>& z) noexcept {
+    return to_cplx(erf_series_dd(z));
+}
+// erfc = 1 - erf with erf from the double-T series, rounded once.
+template <class T>
+[[nodiscard]] inline cplx<T> erfc_series(const cplx<T>& z) noexcept {
+    const cdd<T> e = erf_series_dd(z);
+    return {(-e.re + T(1)).hi, -e.im.hi};
+}
+// The Laplace continued fraction needs ~700 Lentz steps near |z| = 1/2 (rounding errors
+// grow with the step count, and a contracted (FMA) build roughly doubles them: up to 47.9 eps
+// for erfc at 0.4 <= |Re z| <= 1.3 with gcc -march=haswell, 19.4 eps without FMA, before the
+// FMA audit; 12.3 / 8.46 eps after, 300 points, seed 1, fuzz/fma_audit.py --sites).  Inside
+// |Re z| < 5/4, |z| < 4 the double-T series is accurate (cancellation <= e^{2 Re(z)^2}
+// eps^2) and faster.
+template <class T>
+[[nodiscard]] inline bool erf_use_series(const cplx<T>& z) noexcept {
+    const T x = std::abs(z.real());
+    return x < T(0.5) || (x < T(1.25) && x * x + z.imag() * z.imag() < T(16));
 }
 // exp(-z^2) with z^2 = (x^2 - y^2) + 2ixy formed exactly in double-T (fma products), so
 // that a large |z|^2 does not amplify the rounding of z^2 itself.
@@ -565,7 +589,7 @@ template <class T>
 [[nodiscard]] inline cplx<T> erf(const cplx<T>& z) noexcept {
     if (std::isnan(z.real()) || std::isnan(z.imag())) return {nan<T>(), nan<T>()};
     if (z.imag() == T() && std::isinf(z.real())) return {std::copysign(T(1), z.real()), z.imag()};
-    if (std::abs(z.real()) < T(0.5)) return erf_series(z);
+    if (erf_use_series(z)) return erf_series(z);
     if (z.real() > T()) return T(1) - erfc_cf(z);
     return erfc_cf(-z) - T(1);
 }
@@ -573,9 +597,9 @@ template <class T>
 [[nodiscard]] inline cplx<T> erfc(const cplx<T>& z) noexcept {
     if (std::isnan(z.real()) || std::isnan(z.imag())) return {nan<T>(), nan<T>()};
     if (z.imag() == T() && std::isinf(z.real())) return {z.real() > 0 ? T() : T(2), z.imag()};
-    if (z.real() >= T(0.5)) return erfc_cf(z);
-    if (z.real() <= T(-0.5)) return T(2) - erfc_cf(-z);
-    return T(1) - erf_series(z);
+    if (erf_use_series(z)) return erfc_series(z);
+    if (z.real() > T()) return erfc_cf(z);
+    return T(2) - erfc_cf(-z);
 }
 
 // Euler-Maclaurin summation for zeta(s), used for large |Im s| (no cap on |Im s|):

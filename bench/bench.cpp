@@ -99,6 +99,10 @@ void special() {
     add<T>("special", "tgamma", in, [](const Q<T>& q) { return quat::tgamma(q); });
     add<T>("special", "lgamma", in, [](const Q<T>& q) { return quat::lgamma(q); });
     add<T>("special", "erf", in, [](const Q<T>& q) { return quat::erf(q); });
+    add<T>("special", "erf(0.8+1.5i)", axis_pts<T>(T(0.8), T(1.5)), [](const Q<T>& q) { return quat::erf(q); });
+    add<T>("special", "erfc(0.6+0.5i)", axis_pts<T>(T(0.6), T(0.5)), [](const Q<T>& q) { return quat::erfc(q); });
+    add<T>("special", "erfc(2.5+i)", axis_pts<T>(T(2.5), T(1)), [](const Q<T>& q) { return quat::erfc(q); });
+    add<T>("special", "erfc(0.6+5i)", axis_pts<T>(T(0.6), T(5)), [](const Q<T>& q) { return quat::erfc(q); });
     add<T>("special", "expint", in, [](const Q<T>& q) { return quat::expint(q); });
     add<T>("special", "lambert_w", in, [](const Q<T>& q) { return quat::lambert_w(q); });
     add<T>("special", "airy_ai", in, [](const Q<T>& q) { return quat::airy_ai(q); });
