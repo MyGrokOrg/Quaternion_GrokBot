@@ -45,6 +45,20 @@ inline constexpr T ln10_v = static_cast<T>(2.30258509299404568401799145468436420
 template <class T>
 inline constexpr T egamma_v = static_cast<T>(0.577215664901532860606512090082402431L);
 
+// Floating-point conversion U -> T is not narrowing.  For the standard types this is by
+// conversion rank (so long double -> double is narrowing even where both are binary64, as
+// for std::complex); otherwise by list-initialization.  (MSVC 19.5x evaluates the
+// requires-expression form inside explicit() wrongly for float <- double, making the
+// narrowing constructor unusable even explicitly.)
+template <class T>
+inline constexpr int fp_rank = std::is_same_v<T, float> ? 1 : std::is_same_v<T, double> ? 2
+                             : std::is_same_v<T, long double> ? 3 : 0;
+template <class U, class T>
+consteval bool fp_widens() {
+    if constexpr (fp_rank<U> != 0 && fp_rank<T> != 0) return fp_rank<U> <= fp_rank<T>;
+    else return requires(U u) { T{u}; };
+}
+
 // ---- constexpr floating-point helpers -------------------------------------------
 // <cmath> is not constexpr on Clang or libc++ before C++26 (P1383), so the
 // transcendental-free operations use these in constant evaluation.  Every runtime branch
@@ -393,7 +407,7 @@ public:
 
     /// Converting constructor; explicit when the conversion narrows (as std::complex).
     template <std::floating_point U>
-    constexpr explicit(!requires(U u) { T{u}; })
+    constexpr explicit(!detail::fp_widens<U, T>())
         quaternion(const quaternion<U>& q) noexcept
         : a_(static_cast<T>(q.R_component_1())), b_(static_cast<T>(q.R_component_2())),
           c_(static_cast<T>(q.R_component_3())), d_(static_cast<T>(q.R_component_4())) {}

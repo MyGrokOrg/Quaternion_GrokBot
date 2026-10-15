@@ -150,7 +150,10 @@ template <class T>
     if constexpr (std::numeric_limits<T>::digits == 64) {
         // x87 extended: std::fma is a slow software routine, so use Dekker's exact product
         // (Veltkamp split at 2^32 + 1); exact unless a or b is within 2^32 of overflow.
-        if (std::abs(a) < T(0x1p+16000L) && std::abs(b) < T(0x1p+16000L)) {
+        // (2^16000 through pow2: MSVC rejects the literal 0x1p+16000L even in a discarded
+        // branch, since its long double is double.)
+        constexpr T big = detail::cx::pow2<T>(16000);
+        if (std::abs(a) < big && std::abs(b) < big) {
             constexpr T split = T(4294967297.0L);
             const T ta = split * a, ah = ta - (ta - a), al = a - ah;
             const T tb = split * b, bh = tb - (tb - b), bl = b - bh;
