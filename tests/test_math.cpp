@@ -67,6 +67,37 @@ template <class T> void transcendental() {
 }
 TEST(transcendental) { FOR_EACH_TYPE(transcendental); }
 
+// log|q| next to |q| = 1 is relatively accurate (computed from |q|^2 - 1 in double length);
+// before, log(hypot) gave only absolute accuracy there (e.g. 0 for the first point).
+// References: mpmath at 400 bits for the exact (binary64) inputs.
+template <class T> void log_near_unit() {
+    using Q = quaternion<T>;
+    if constexpr (std::numeric_limits<T>::digits >= 53) {
+        struct pt { double a, b, c, d; long double ln, lg; };
+        const pt P[] = {
+            {0x1.fffffffffffc0p-1, 0x1p-23, 0, 0, 2.524354896707237777317531e-29L, 1.0963134020054066135346e-29L},
+            {0x1.ff5fdbdeb6fd2p-1, 0x1.94d38707c8210p-5, -0x1.52120d939d01ep-16, -0x1.c2f75f94187f7p-21,
+             -1.245280173448013895465821e-17L, -5.408183077519967678167502e-18L},
+            {0x1.3333333333333p-1, 0x1.999999999999ap-1, 0, 0, 2.220446049250313154802973e-17L, 9.643274665532871428387039e-18L},
+            {0x1.ffffffc476116p-1, 0x1.3f37d02c75800p-29, 0, 0, -6.93122827933508981306832e-9L, -3.010194194527000466631502e-9L},
+            {-0x1.50082a256e6a2p-4, 0x1.04f4c6405b7bfp-3, 0x1.7e875f79dce02p-1, -0x1.b04b410deb98ep-1,
+             0.1288874979564298891418119L, 0.05597512914879414740825717L},
+        };
+        const T tol = std::numeric_limits<T>::epsilon() * T(4);
+        for (const pt& p : P) {
+            const Q q(T(p.a), T(p.b), T(p.c), T(p.d));
+            const T ln = static_cast<T>(p.ln), lg = static_cast<T>(p.lg);
+            CHECK(std::abs(quat::log(q).w() - ln) <= tol * std::abs(ln));
+            CHECK(std::abs(quat::log10(q).w() - lg) <= tol * std::abs(lg));
+            // the complex wrapper path (Annex G kernel) agrees on the i axis
+            if (p.c == 0 && p.d == 0) CHECK(std::abs(quat::log(Q(T(p.a), T(p.b))).w() - ln) <= tol * std::abs(ln));
+        }
+    }
+    // |q| = 1 exactly: log|q| = 0 exactly
+    CHECK(quat::log(Q(T(0.5), T(0.5), T(0.5), T(-0.5))).w() == T(0));
+}
+TEST(log_near_unit_circle) { FOR_EACH_TYPE(log_near_unit); }
+
 template <class T> void polar_proj() {
     using Q = quaternion<T>;
     const T rel = std::numeric_limits<T>::epsilon() * T(64);
