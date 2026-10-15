@@ -743,6 +743,55 @@ template <class T>
     return std::hypot(std::hypot(q.x(), q.y()), q.z());
 #endif
 }
+// a * b = p + e exactly.  Hardware fma where the build has it (there the compiler may also
+// contract the Dekker split, which would break it); Dekker's split otherwise and for
+// formats wider than double (x87 long double has no fma instruction to contract into).
+template <class T>
+inline void exact_mul(T a, T b, T& p, T& e) noexcept {
+    using L = std::numeric_limits<T>;
+#if defined(FP_FAST_FMA) || defined(__FMA__) || defined(__AVX2__) || defined(__aarch64__) || defined(_M_ARM64)
+    if constexpr (L::digits <= 53) {
+        p = a * b;
+        e = std::fma(a, b, -p);
+        return;
+    } else
+#endif
+    {
+        constexpr T split = T((std::uint64_t(1) << ((L::digits + 1) / 2)) + 1);
+        p = a * b;
+        const T ca = split * a, ah = ca - (ca - a), al = a - ah;
+        const T cb = split * b, bh = cb - (cb - b), bl = b - bh;
+        e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+    }
+}
+// log|q| for 0.7 <= |q| <= 1.42 (no overflow or harmful underflow in the squares), with
+// relative accuracy: (log1p s)/2 with s = a^2 + b^2 + c^2 + d^2 - 1 rounded once from its
+// exact value.  The eight parts of the exact squares and -1 are summed by repeated
+// error-free cascades (Ogita-Rump-Oishi VecSum) until the leading term carries the sum.
+template <class T>
+[[nodiscard]] inline T log_abs_near1(const quaternion<T>& q) noexcept {
+    T t[9];
+    t[0] = T(-1);
+    exact_mul(q.w(), q.w(), t[1], t[5]);
+    exact_mul(q.x(), q.x(), t[2], t[6]);
+    exact_mul(q.y(), q.y(), t[3], t[7]);
+    exact_mul(q.z(), q.z(), t[4], t[8]);
+    constexpr T eps = std::numeric_limits<T>::epsilon();
+    for (int pass = 0; pass < 12; ++pass) {
+        // cascade: t[8] becomes the rounded sum, t[0..7] the exact rounding errors
+        for (int i = 1; i < 9; ++i) {
+            const T a = t[i - 1], b = t[i], s = a + b, bb = s - a;
+            t[i] = s;
+            t[i - 1] = (a - (s - bb)) + (b - bb);
+        }
+        T tail = T();
+        for (int i = 0; i < 8; ++i) tail += std::abs(t[i]);
+        if (tail <= eps * eps * std::abs(t[8]) || tail == T()) break;
+    }
+    T lo = T();
+    for (int i = 0; i < 8; ++i) lo += t[i];
+    return std::log1p(t[8] + lo) / T(2);
+}
 // Rebuild s + u*v where u is the unit vector of q (i if q has no vector part).
 template <class T>
 [[nodiscard]] inline quaternion<T> along(const quaternion<T>& q, T vlen, T s, T v) noexcept {
@@ -872,8 +921,11 @@ template <class T>
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> log(const quaternion<T>& q) noexcept {
-    const T v = vabs(q);
-    return along(q, v, std::log(quat::abs(q)), std::atan2(v, q.w()));
+    const T v = vabs(q), r = quat::abs(q);
+    // Next to |q| = 1, log(r) cancels (r carries an absolute error of ulp(1)/2); there
+    // log|q| comes from |q|^2 - 1 in double length.
+    const T lr = (r >= T(0.7) && r <= T(1.42)) ? log_abs_near1(q) : std::log(r);
+    return along(q, v, lr, std::atan2(v, q.w()));
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> sqrt(const quaternion<T>& q) noexcept {
