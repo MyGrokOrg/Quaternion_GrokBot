@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, fp-contract-restore]
+    branches: [main]
   pull_request:
 
 jobs:
