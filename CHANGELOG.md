@@ -2,6 +2,23 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## log and log10 relatively accurate next to |z| = 1 (changes log, log10 and pow results)
+
+Details are in the README section *log near |z| = 1*.
+
+* **Change.** For a finite q with a nonzero vector part and 0.49 ≤ ‖q‖² ≤ 2.02, ln‖q‖ is now ½·log1p(‖q‖² − 1), with ‖q‖² − 1 summed in double length from the exact squares (`std::fma` where the build has hardware FMA, Dekker's split otherwise and for x87 `long double`) by repeated error-free cascades. Before, it was log(abs(q)), accurate only absolutely there. The same code runs on GCC, Clang, MSVC and clang-cl; elsewhere nothing changed.
+* **Results that change** (only for such q; real, zero and non-finite arguments are unchanged):
+  * `log`, `log10`: the real part, by at most about ε absolutely; the vector part is bit-identical (200,000 random quaternions with 0.5 ≤ ‖q‖ ≤ 2). 19,980 of the 20,000 `log_unit_check.py` points differ in at least one type.
+  * `pow(q, x)`, `pow(q, p)`, `pow(q, complex)`, `pow(complex, p)` with such a base: every component, by about |p|·ε relative (11,373 of 20,000 results differ for p in [−4, 4], 17,986 of 20,000 for |p| from 10 to 1000). `pow(T, p)`, `pow(q, int)` and all other functions are unchanged, and the other rows of the seed-20261014 fuzz report are identical.
+  * The bit-identity goldens cover only the transcendental-free operations: unchanged, no hash updated.
+* **Accuracy** (worst relative error in ε, before → after):
+  * Fuzz, seed 20261014, 250 points per function and type, all four fuzz builds: double `log` 1.47e6 → 0.907, `log10` 6.8e5 → 1.26; long double 1.14e8 → 1.14, 1.78e8 → 1.28. With the new |z|~1 region (real part checked on its own): double 4.5e15 → 0.907 and 4.5e15 → 1.26, long double 9.22e18 → 1.14 and 9.22e18 → 1.36; 137 failures → 0.
+  * `fuzz/log_unit_check.py log`, 20,000 points, seed 1, real part: double 3.56e16 → 0.98 (`log`), 3.56e16 → 1.68 (`log10`); long double 9.22e18 → 1.84, 9.22e18 → 2.09; float 8.35e8 → 0.998, 8.35e8 → 1.26. The same with GCC 14 (with and without `-march=haswell`), Clang 19 `-march=haswell` and Clang 18 with libc++.
+  * `pow` (`log_unit_check.py pow`, 20,000 points): the normwise worst case is set by the angle p·arg q and stays (p in [−4, 4], seed 5: double 20.3 → 20.3, long double 22.1 → 22.2; |p| from 10 to 1000, seed 6: 5.38e3 → 5.33e3, 4.78e3 → 4.78e3); the error of ‖q^p‖ drops (4.23 → 1.71 and 3.42 → 2.98; 702 → 266 and 713 → 311). Fuzz `pow` stays at 16 (double) and 21.4 ε (long double).
+* **Fuzz.** The listed-but-not-failed exemption for `log`/`log10` "complex near 1" is gone (`KNOWN` is empty), so these fail the job again. New region for `log`, `log10` and `pow`: points next to the whole unit circle (|z| = 1 ± 10⁻¹⁷…10⁻², a quarter with x² + y² − 1 cancelling beyond double length), with the real part of `log`/`log10` also checked on its own. Its points come from a generator seeded by the point they replace, so every other function keeps its samples at a given seed. New script `fuzz/log_unit_check.py` with evaluator `fuzz/log_unit_eval.cpp` (not part of CI).
+* **Speed** (medians of 5 alternating runs, `-O3`, new/old, GCC 14 / GCC 14 haswell / Clang 19, double): `log` 0.90 / 0.85 / 0.98, `log10` 0.93 / 0.89 / 0.95, `log_unit` 0.97 / 0.85 / 0.88, `log_far` (unchanged path) 0.97 / 1.01 / 1.05, `pow` 0.91 / 0.89 / 0.99, `pow_unit` 1.00 / 0.89 / 0.98; long double 0.85–1.04. The new path skips abs(q) and its three `hypot` calls (GCC 14 double `log` 61.0 → 54.9 ns). Unchanged `exp` read 1.41 with GCC 14 in double, the noise of the shared machine.
+* **Tests.** `test_math` checks five points next to ‖q‖ = 1 against mpmath to 4 ε (double, long double); 22 of those checks fail with the old header. New bench cases `log_far`, `log_unit`, `pow_unit`.
+
 ## MSVC and clang-cl support (Windows)
 
 Details are in the README section *Supported toolchains*.
