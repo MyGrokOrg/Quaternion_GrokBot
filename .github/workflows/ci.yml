@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, fp-contract-restore]
   pull_request:
 
 jobs:
@@ -59,6 +59,7 @@ jobs:
           - { name: clang-cl /arch:AVX2, toolset: "-T ClangCL", build_type: Release, cxxflags: "/arch:AVX2", avx2: true }
           - { name: msvc ARM64, toolset: "", build_type: Debug, arch: ARM64, runner: windows-11-arm }
           - { name: msvc ARM64, toolset: "", build_type: Release, arch: ARM64, runner: windows-11-arm }
+          - { name: msvc ARM64 /fp:contract, toolset: "", build_type: Release, cxxflags: "/fp:contract", arch: ARM64, runner: windows-11-arm }
           - { name: clang-cl ARM64, toolset: "-T ClangCL", build_type: Release, arch: ARM64, runner: windows-11-arm }
     name: ${{ matrix.name }} (${{ matrix.build_type }})
     env:
@@ -88,6 +89,8 @@ jobs:
           # informational: how often the C library's hypot differs from a correctly rounded one
           & build/${{ matrix.build_type }}/test_constexpr.exe | Select-String 'hypot|differs'
           & build/${{ matrix.build_type }}/test_bitident.exe | Select-String 'FMA build'
+          # the includer's contraction state before and after the headers
+          & build/${{ matrix.build_type }}/test_fpcontract.exe
       - name: Install
         run: cmake --install build --config ${{ matrix.build_type }} --prefix ${{ runner.temp }}/install
 
