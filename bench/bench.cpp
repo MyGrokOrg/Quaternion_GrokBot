@@ -20,7 +20,7 @@ volatile double sink;  // defeats dead-code elimination
 
 struct bench_case {
     std::string group, name, type;
-    std::function<double(long)> run;  // runs n calls, returns a checksum
+    std::function<double(long long)> run;  // runs n calls, returns a checksum
 };
 std::vector<bench_case>& cases() {
     static std::vector<bench_case> c;
@@ -37,10 +37,10 @@ const char* tname() {
 // Register f applied to each of the quaternions in `in`.
 template <class T, class F>
 void add(const char* group, const char* name, std::vector<Q<T>> in, F f) {
-    cases().push_back({group, name, tname<T>(), [in = std::move(in), f](long n) {
+    cases().push_back({group, name, tname<T>(), [in = std::move(in), f](long long n) {
                            double acc = 0;
                            const std::size_t m = in.size();
-                           for (long i = 0; i < n; ++i) {
+                           for (long long i = 0; i < n; ++i) {
                                const auto r = f(in[static_cast<std::size_t>(i) % m]);
                                acc += static_cast<double>(quat::real(r));
                            }
@@ -177,20 +177,20 @@ int main(int argc, char** argv) {
     for (auto& c : cases()) {
         const std::string full = c.group + "/" + c.name + "/" + c.type;
         if (!filter.empty() && full.find(filter) == std::string::npos) continue;
-        long n = 1;
+        long long n = 1;  // long is 32 bits on Windows
         double secs = 0;
         for (;;) {
             const auto t0 = clk::now();
             sink = c.run(n);
             secs = std::chrono::duration<double>(clk::now() - t0).count();
-            if (secs >= min_time || n > (1L << 40)) break;
-            n = secs > 0 ? std::max(2 * n, static_cast<long>(n * min_time / secs * 1.2)) : 2 * n;
+            if (secs >= min_time || n > (1LL << 40)) break;
+            n = secs > 0 ? std::max(2 * n, static_cast<long long>(static_cast<double>(n) * min_time / secs * 1.2)) : 2 * n;
         }
         const double ns = secs * 1e9 / static_cast<double>(n);
-        std::printf("%-12s %-22s %-12s %14.1f %12ld\n", c.group.c_str(), c.name.c_str(), c.type.c_str(), ns, n);
+        std::printf("%-12s %-22s %-12s %14.1f %12lld\n", c.group.c_str(), c.name.c_str(), c.type.c_str(), ns, n);
         std::fflush(stdout);
         if (js) {
-            std::fprintf(js, "%s    {\"name\": \"%s\", \"ns_per_call\": %.3f, \"calls\": %ld}", first ? "" : ",\n",
+            std::fprintf(js, "%s    {\"name\": \"%s\", \"ns_per_call\": %.3f, \"calls\": %lld}", first ? "" : ",\n",
                          full.c_str(), ns, n);
             first = false;
         }
