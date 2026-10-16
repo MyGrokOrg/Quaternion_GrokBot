@@ -236,6 +236,140 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  sanitizers-macos:
+    # ASan + UBSan (Debug) with Apple Clang (SDK libc++) and Homebrew LLVM clang (its own
+    # libc++), on arm64 and x86_64 (x87 long double with the library's own kernels).
+    name: sanitizers (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: apple-clang arm64, runner: macos-latest }
+          - { name: llvm-clang arm64, runner: macos-latest, brew: true }
+          - { name: apple-clang x86_64, runner: macos-15-intel }
+          - { name: llvm-clang x86_64, runner: macos-15-intel, brew: true }
+    env:
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      ASAN_OPTIONS: abort_on_error=1:strict_string_checks=1:detect_stack_use_after_return=1
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          uname -m; sw_vers -productVersion
+          if [ "${{ matrix.brew }}" = true ]; then
+            brew install llvm >/dev/null
+            p=$(brew --prefix llvm)
+            echo "CXX=$p/bin/clang++" >> $GITHUB_ENV
+            echo "LDFLAGS=-L$p/lib/c++ -L$p/lib/unwind -lunwind -Wl,-rpath,$p/lib/c++" >> $GITHUB_ENV
+          else
+            echo "CXX=$(xcrun -f clang++)" >> $GITHUB_ENV
+          fi
+      - name: Configure
+        run: |
+          $CXX --version | head -1
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      - name: Build
+        run: cmake --build build -j 4
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizers-windows:
+    # AddressSanitizer on Windows: MSVC (/fsanitize=address, the runtime that ships with the
+    # toolset) and clang-cl (LLVM's runtime).  /RTC1 is incompatible with ASan, so the Debug
+    # flags drop it.
+    name: asan (${{ matrix.name }} ${{ matrix.build_type }})
+    runs-on: ${{ matrix.runner || 'windows-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: msvc x64, toolset: "", arch: x64, build_type: Debug }
+          - { name: msvc x64, toolset: "", arch: x64, build_type: Release }
+          - { name: clang-cl x64, toolset: "-T ClangCL", arch: x64, build_type: Release, clang: true }
+          - { name: msvc ARM64, toolset: "", arch: ARM64, build_type: Release, runner: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $msvc = (Get-ChildItem "$vs\VC\Tools\MSVC" | Sort-Object Name | Select-Object -Last 1).FullName
+          $h = if ("${{ matrix.arch }}" -eq "ARM64") { "Hostarm64\arm64" } else { "Hostx64\x64" }
+          if ("${{ matrix.clang }}" -eq "true") {
+            $llvm = "$vs\VC\Tools\Llvm\x64"
+            $rt = (Get-ChildItem "$llvm\lib\clang" | Sort-Object Name | Select-Object -Last 1).FullName + "\lib\windows"
+            Get-ChildItem $rt -Filter "clang_rt.asan*" | ForEach-Object Name
+            "PATH=$rt;$env:PATH" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            $lflags = "/LIBPATH:`"$rt`" clang_rt.asan_dynamic-x86_64.lib clang_rt.asan_dynamic_runtime_thunk-x86_64.lib"
+          } else {
+            Get-ChildItem "$msvc\bin\$h" -Filter "clang_rt.asan*.dll" | ForEach-Object Name
+            "PATH=$msvc\bin\$h;$env:PATH" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            $lflags = ""
+          }
+          $env:CXXFLAGS = "/fsanitize=address"
+          cmake -B build -A ${{ matrix.arch }} ${{ matrix.toolset }} "-DCMAKE_CXX_FLAGS_DEBUG=/Zi /Ob0 /Od" "-DCMAKE_EXE_LINKER_FLAGS=$lflags" "-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/debug /INCREMENTAL:NO"
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} -j
+      - name: Test
+        run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure
+
+  gcc-macos:
+    # GCC (Homebrew) with libstdc++ on macOS, where the comparisons against the std:: special
+    # math functions run.
+    name: gcc ${{ matrix.arch }} (${{ matrix.build_type }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, runner: macos-latest, build_type: Debug }
+          - { arch: arm64, runner: macos-latest, build_type: Release }
+          - { arch: x86_64, runner: macos-15-intel, build_type: Debug }
+          - { arch: x86_64, runner: macos-15-intel, build_type: Release }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          uname -m; sw_vers -productVersion
+          brew install gcc >/dev/null || true
+          gxx=$(ls $(brew --prefix gcc)/bin/g++-[0-9]* | sort -V | tail -1)
+          echo "CXX=$gxx" >> $GITHUB_ENV
+          $gxx --version | head -1
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+      - name: Build
+        run: cmake --build build -j 4
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  mingw:
+    # MinGW-w64 GCC (MSYS2 UCRT64) on Windows x64: libstdc++, x87 80-bit long double, and
+    # mingw-w64's C library functions on top of the UCRT.
+    name: mingw-w64 gcc (${{ matrix.build_type }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+      - name: Configure
+        run: |
+          g++ --version | head -1
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
   bitident-haswell:
     # Runtime results of the transcendental-free operations must not change with the
     # constexpr work: compile tests/bitident/dump.cpp against the header at the baseline
