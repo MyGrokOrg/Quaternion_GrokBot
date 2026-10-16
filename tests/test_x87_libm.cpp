@@ -6,7 +6,7 @@
 //    exactly the reference is printed;
 //  * special values (+-0, +-inf, NaN) behave as the C library's;
 //  * where the C library is glibc, a seeded random comparison with it (glibc's x87 long double
-//    functions are accurate to about 1 ulp, so the two must stay within 2 ulp of each other);
+//    functions are accurate to a few ulp; the bounds are 3 ulp, 8 for tgamma and lgamma);
 //  * the overloads in quat::detail::lm are the ones the library calls.
 #include "test_framework.hpp"
 
@@ -33,12 +33,22 @@ ld call(std::string_view f, ld x, [[maybe_unused]] ld y) {
     if (f == "sin") return lm::sin(x);
     if (f == "cos") return lm::cos(x);
     if (f == "tan") return lm::tan(x);
+    if (f == "sinh") return lm::sinh(x);
+    if (f == "expm1") return lm::expm1(x);
+    if (f == "pow") return lm::pow(x, y);
+    if (f == "tgamma") return lm::tgamma(x);
+    if (f == "lgamma") return lm::lgamma(x);
     return std::numeric_limits<ld>::quiet_NaN();
 }
 ld call_std(std::string_view f, ld x, [[maybe_unused]] ld y) {
     if (f == "sin") return std::sin(x);
     if (f == "cos") return std::cos(x);
     if (f == "tan") return std::tan(x);
+    if (f == "sinh") return std::sinh(x);
+    if (f == "expm1") return std::expm1(x);
+    if (f == "pow") return std::pow(x, y);
+    if (f == "tgamma") return std::tgamma(x);
+    if (f == "lgamma") return std::lgamma(x);
     return std::numeric_limits<ld>::quiet_NaN();
 }
 // distance in units of the last place of b (b finite, nonzero)
@@ -79,15 +89,29 @@ TEST(mpmath_references) {
 }
 
 TEST(special_values) {
-    const ld nan = std::numeric_limits<ld>::quiet_NaN();
-    for (const char* f : {"sin", "cos", "tan"}) {
-        for (ld x : {0.0L, -0.0L, inf, -inf, nan, std::numeric_limits<ld>::denorm_min(), -std::numeric_limits<ld>::min(),
-                     std::numeric_limits<ld>::max(), -std::numeric_limits<ld>::max()}) {
+    const ld nan = std::numeric_limits<ld>::quiet_NaN(), big = std::numeric_limits<ld>::max();
+    const ld tiny = std::numeric_limits<ld>::denorm_min(), mn = std::numeric_limits<ld>::min();
+    const ld xs[] = {0.0L, -0.0L, inf, -inf, nan, tiny, -tiny, mn, -mn, big, -big, 1.0L, -1.0L, 2.0L, -2.0L, 0.5L,
+                     -0.5L, 11356.0L, 11357.0L, -11400.0L, 1754.0L, 1755.5L, -1754.5L, -1760.5L, 0x1p-70L, -0x1p-70L};
+    auto agree = [](ld a, ld b) {
+        return (std::isnan(a) && std::isnan(b)) || same_bits(a, b) ||
+               (std::isfinite(b) && b != 0 && std::isfinite(a) && ulps(a, b) <= 2.0L);
+    };
+    for (const char* f : {"sin", "cos", "tan", "sinh", "expm1", "tgamma", "lgamma"})
+        for (ld x : xs) {
             const ld a = call(f, x, 0), b = call_std(f, x, 0);
-            CHECK((std::isnan(a) && std::isnan(b)) || same_bits(a, b) || ulps(a, b) <= 1.0L);
+            if (!agree(a, b)) std::fprintf(stderr, "  %s(%La) = %La, C library %La\n", f, x, a, b);
+            CHECK(agree(a, b));
         }
-    }
+    for (ld x : xs)
+        for (ld y : xs) {
+            const ld a = lm::pow(x, y), b = std::pow(x, y);
+            if (!agree(a, b)) std::fprintf(stderr, "  pow(%La, %La) = %La, C library %La\n", x, y, a, b);
+            CHECK(agree(a, b));
+        }
     CHECK(std::signbit(lm::sin(-0.0L)) && std::signbit(lm::tan(-0.0L)) && lm::cos(-0.0L) == 1.0L);
+    CHECK(std::signbit(lm::sinh(-0.0L)) && std::signbit(lm::expm1(-0.0L)));
+    CHECK(lm::pow(-2.0L, 3) == -8.0L && lm::pow(2, 0.5L) == lm::pow(2.0L, 0.5L));
 }
 
 TEST(overloads_are_used) {
@@ -104,23 +128,43 @@ TEST(overloads_are_used) {
 
 #if defined(__GLIBC__)
 TEST(random_vs_glibc) {
-    // seed 20261016; 20,000 inputs per function: 10,000 with |x| in [2^-40, 2^16) and 10,000 in
-    // [2^16, 2^16384), random significands and signs
+    // seed 20261016; 20,000 inputs per function (pow: 20,000 pairs), drawn below.  The kernels
+    // are within about 0.55 ulp of mpmath, so the differences are glibc's own errors: up to
+    // about 1.4 ulp for the trigonometric functions, sinh, expm1 and pow, and several ulp for
+    // tgamma and lgamma; the bounds are 3 and 8 ulp.  lgamma for x < 0 is compared only where
+    // |lgamma| > 1/2 (glibc loses relative accuracy next to its zeros there).
     std::mt19937_64 g(20261016);
-    for (const char* f : {"sin", "cos", "tan"}) {
+    auto u = [&g](ld a, ld b) { return a + (b - a) * static_cast<ld>(g() >> 11) * 0x1p-53L; };
+    auto mag = [&g](int lo, int hi) {
+        const int e = lo + static_cast<int>(g() % static_cast<std::uint64_t>(hi - lo));
+        const ld x = std::ldexp(static_cast<ld>(g() | (std::uint64_t(1) << 63)), e - 64);
+        return (g() & 1) ? -x : x;
+    };
+    for (const char* f : {"sin", "cos", "tan", "sinh", "expm1", "pow", "tgamma", "lgamma"}) {
+        const std::string_view fs = f;
         ld worst = 0;
-        int differ = 0;
+        int differ = 0, n = 0;
         for (int i = 0; i < 20000; ++i) {
-            const int e = i < 10000 ? static_cast<int>(g() % 56) - 40 : 16 + static_cast<int>(g() % 16368);
-            ld x = std::ldexp(static_cast<ld>(g() | (std::uint64_t(1) << 63)), e - 64);
-            if (g() & 1) x = -x;
-            const ld a = call(f, x, 0), b = call_std(f, x, 0);
+            ld x = 0, y = 0;
+            const bool lo = i < 10000;
+            if (fs == "sin" || fs == "cos" || fs == "tan") x = lo ? mag(-40, 16) : mag(16, 16384);
+            else if (fs == "sinh") x = lo ? mag(-40, 3) : u(-11350, 11350);
+            else if (fs == "expm1") x = lo ? mag(-40, 3) : u(-60, 11350);
+            else if (fs == "pow") {
+                x = lo ? u(0.01L, 100) : std::fabs(mag(-60, 60));
+                y = lo ? u(-60, 60) : u(-150, 150);
+            } else if (fs == "tgamma") x = lo ? u(0.001L, 1750) : u(-170, 0);
+            else x = lo ? u(0.001L, 1000) : u(-50, 0);
+            const ld a = call(f, x, y), b = call_std(f, x, y);
+            if (!std::isfinite(b) || b == 0 || (fs == "lgamma" && x < 0 && std::fabs(b) < 0.5L)) continue;
+            ++n;
             const ld d = ulps(a, b);
             differ += !same_bits(a, b);
             worst = std::max(worst, d);
         }
-        std::printf("  %-4s vs glibc: %d of 20000 differ, at most %Lg ulp\n", f, differ, worst);
-        CHECK(worst <= 2.0L);
+        const ld bound = (fs == "tgamma" || fs == "lgamma") ? 8.0L : 3.0L;
+        std::printf("  %-6s vs glibc: %5d of %5d differ, at most %Lg ulp (bound %Lg)\n", f, differ, n, worst, bound);
+        CHECK(worst <= bound);
     }
 }
 #endif

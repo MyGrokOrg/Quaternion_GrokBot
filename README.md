@@ -24,7 +24,7 @@ auto [w, x, y, z] = p;            // structured bindings
 
 Define these before including the headers (or with `-D`); each must be the same in every translation unit.
 
-* `QUATERNION_X87_LIBM` — `1`: use the library's own x87 `long double` `sin`, `cos` and `tan` (`quaternion/detail/x87_libm.hpp`) instead of the C library's. `0` (the default for now): the header is not included and nothing changes. It needs the x87 80-bit `long double` (x86_64 with GCC or Clang) and is an `#error` elsewhere. It is meant for macOS x86_64, where Apple's x87 functions are inaccurate (see [Supported toolchains](#supported-toolchains)); CI forces it on in Linux jobs (`-DQUATERNION_X87_LIBM=1`, tested by `tests/test_x87_libm.cpp`). float and double are never affected.
+* `QUATERNION_X87_LIBM` — `1`: use the library's own x87 `long double` `sin`, `cos`, `tan`, `sinh`, `expm1`, `pow`, `tgamma` and `lgamma` (`quaternion/detail/x87_libm.hpp`) instead of the C library's. `0` (the default for now): the header is not included and nothing changes. It needs the x87 80-bit `long double` (x86_64 with GCC or Clang) and is an `#error` elsewhere. It is meant for macOS x86_64, where Apple's x87 functions are inaccurate (see [Supported toolchains](#supported-toolchains)); CI forces it on in Linux jobs (`-DQUATERNION_X87_LIBM=1`, tested by `tests/test_x87_libm.cpp`). float and double are never affected.
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release

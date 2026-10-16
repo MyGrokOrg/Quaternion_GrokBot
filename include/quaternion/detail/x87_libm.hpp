@@ -1,5 +1,6 @@
 // Own long double kernels for the C library functions that Apple's x87 libm gets wrong
-// (macOS x86_64): sinl, cosl and tanl so far.  See the README, "Supported toolchains".
+// (macOS x86_64): sinl, cosl, tanl, sinhl, expm1l, powl, tgammal and lgammal.  See the
+// README, "Supported toolchains".
 //
 // Included by quaternion.hpp only when QUATERNION_X87_LIBM is 1 (off by default for now;
 // -DQUATERNION_X87_LIBM=1 forces it on, e.g. on Linux x86_64 for testing).  It adds non-template
@@ -10,6 +11,10 @@
 //   * sin, cos, tan: exact Payne-Hanek reduction of |x| >= pi/4 with 256 bits of 2/pi taken
 //     from a 16,768-bit table at the exponent of x (integer arithmetic, so every argument up to
 //     LDBL_MAX is reduced to within 2^-190 of a quadrant), then Taylor kernels on |r| <= pi/4.
+//   * exp, expm1, sinh: x = k ln2 + r with ln2 in three parts; Taylor kernel for e^r - 1.
+//   * pow(x, y) = exp(y log x) with log x double-length (atanh series).
+//   * lgamma: Stirling for x >= 20, upward shift below, Taylor series next to the zeros at 1
+//     and 2, reflection for x < 0; tgamma = exp(lgamma) with the sign, exact small factorials.
 // Constants: tests/gen/gen_x87_constants.py (mpmath).  Tests: tests/test_x87_libm.cpp.
 #ifndef QUATERNION_DETAIL_X87_LIBM_HPP
 #define QUATERNION_DETAIL_X87_LIBM_HPP
@@ -447,6 +452,25 @@ inline constexpr std::uint64_t k_two_over_pi[262] = {
     const ld tail = (((1.0L - w) - hz) - 0.5L * z.lo) + (z.hi * z.hi * horner(k_cos, z.hi) - r.hi * r.lo);
     return fast_two_sum(w, tail);
 }
+// sin r or cos r (|r| <= pi/4) to full double-length accuracy (about 2^-120), by the Taylor
+// series in dd arithmetic.  ksin/kcos above are accurate to about 2^-70, enough for a rounded
+// result; the gamma reflection needs log|sin(pi x)| next to the zeros of lgamma.
+[[nodiscard]] inline dd trig_series(dd r, bool cosine) noexcept {
+    const dd z = neg(mul(r, r));
+    dd term = cosine ? dd{1.0L, 0.0L} : r, sum = term;
+    for (int k = cosine ? 1 : 2; k < 40; k += 2) {  // term *= -r^2 / (k (k + 1))
+        term = div(mul(term, z), {static_cast<ld>(k * (k + 1)), 0.0L});
+        sum = add(sum, term);
+        if (std::fabs(term.hi) < std::fabs(sum.hi) * 0x1p-130L) break;
+    }
+    return sum;
+}
+// sin(pi a) for |a| <= 1/2, double-length (for the gamma reflection)
+[[nodiscard]] inline dd sinpi_dd(ld a) noexcept {
+    const ld b = std::fabs(a);
+    const dd s = b <= 0.25L ? trig_series(mul(k_pi, b), false) : trig_series(mul(k_pi, 0.5L - b), true);
+    return a < 0 ? neg(s) : s;
+}
 enum class trig { sin, cos, tan };
 [[nodiscard]] inline ld trig_eval(ld x, trig f) noexcept {
     const ld ax = std::fabs(x);
@@ -466,6 +490,180 @@ enum class trig { sin, cos, tan };
     return (f != trig::cos && x < 0) ? -res : res;
 }
 
+// ---- exp, expm1, sinh, log, pow -------------------------------------------------
+// e^r - 1 for r = hi + lo, |r| <= ln2/2 (+ rounding), double-length.
+[[nodiscard]] inline dd kexpm1(dd r) noexcept {
+    const dd z = two_prod(r.hi, r.hi);
+    const ld P = k_exp[0] + r.hi * horner(k_exp_tail, r.hi);  // 1/2 + r/6 + ...
+    const dd t = mul(z, P);
+    return add(fast_two_sum(r.hi, t.hi), t.lo + r.lo * (1.0L + r.hi));
+}
+// y = k ln2 + r, |r| <= ln2/2 (+ rounding), for |y.hi| < 2^15 ln2 (about 22713).
+[[nodiscard]] inline int exp_reduce(dd y, dd& r) noexcept {
+    const ld kf = std::nearbyint(y.hi * k_inv_ln2);
+    const dd a = add(two_sum(y.hi - kf * k_ln2_1, y.lo), neg(two_prod(kf, k_ln2_2)));
+    r = add(a, -kf * k_ln2_3);
+    return static_cast<int>(kf);
+}
+// e^y rounded; y double-length
+[[nodiscard]] inline ld exp_dd(dd y) noexcept {
+    if (y.hi > 11400.0L) return std::numeric_limits<ld>::infinity();
+    if (y.hi < -11450.0L) return 0.0L;
+    dd r;
+    const int k = exp_reduce(y, r);
+    const dd v = add(kexpm1(r), 1.0L);  // e^r
+    return scale(round(v), k);
+}
+[[nodiscard]] inline ld expm1(ld x) noexcept {
+    if (!(std::fabs(x) <= 11400.0L) || x == 0) return std::expm1(x);  // NaN, +-inf, +-0, overflow
+    if (std::fabs(x) < 0x1p-65L) return x;
+    if (x < -46.0L) return -1.0L;  // e^x < 2^-66
+    if (std::fabs(x) <= 0.34657359027997265471L) return round(kexpm1({x, 0.0L}));
+    dd r;
+    const int k = exp_reduce({x, 0.0L}, r);
+    const dd em = kexpm1(r);
+    if (k > 64) return scale(round(add(em, 1.0L)), k);  // the -1 is below the last bit
+    return round(add(scale(em, k), two_sum(std::ldexp(1.0L, k), -1.0L)));  // 2^k em + (2^k - 1)
+}
+[[nodiscard]] inline ld sinh(ld x) noexcept {
+    const ld ax = std::fabs(x);
+    if (!(ax <= 11400.0L) || x == 0) return std::sinh(x);
+    if (ax < 0x1p-32L) return x;
+    ld res;
+    if (ax <= 1.0L) {  // x + x^3 (1/6 + x^2/120 + ...)
+        const dd z = two_prod(ax, ax);
+        const ld P = k_sinh[0] + z.hi * horner(k_sinh_tail, z.hi);
+        const dd t = mul(mul(z, P), ax);
+        res = round(add(fast_two_sum(ax, t.hi), t.lo));
+    } else {
+        dd r;
+        const int k = exp_reduce({ax, 0.0L}, r);
+        const dd v = add(kexpm1(r), 1.0L);  // e^ax = 2^k v
+        if (ax > 46.0L) res = scale(round(v), k - 1);
+        else res = 0.5L * round(add(scale(v, k), neg(scale(div({1.0L, 0.0L}, v), -k))));
+    }
+    return x < 0 ? -res : res;
+}
+// log x, double-length, x > 0 finite: x = 2^e m, m in [sqrt(1/2), sqrt(2)),
+// log m = 2 atanh(f), f = (m - 1)/(m + 1), |f| <= 0.1716, s = f^2 <= 0.0295.
+[[nodiscard]] inline dd log_dd(ld x) noexcept {
+    int e;
+    ld m = std::frexp(x, &e);
+    if (m < 0.70710678118654752440L) m *= 2, --e;
+    const dd f = div({m - 1.0L, 0.0L}, two_sum(m, 1.0L));
+    const dd s = mul(f, f);
+    // 1 + s/3 + s^2/5 + s^3/7 double-length, s^4 (1/9 + s/11 + ...) in long double (< 2^-23)
+    const dd s2 = mul(s, s), s3 = mul(s2, s);
+    dd P = add(add(div(s, {3.0L, 0.0L}), div(s2, {5.0L, 0.0L})), div(s3, {7.0L, 0.0L}));
+    P = add(add(P, s2.hi * s2.hi * horner(k_log_tail, s.hi)), 1.0L);
+    const dd lm = mul(mul(f, P), 2.0L);
+    const ld ef = static_cast<ld>(e);
+    const dd le = add(add(two_prod(ef, k_ln2_2), ef * k_ln2_3), ef * k_ln2_1);  // ef*k_ln2_1 exact
+    return add(le, lm);
+}
+[[nodiscard]] inline dd log_dd(dd x) noexcept { return add(log_dd(x.hi), x.lo / x.hi); }
+[[nodiscard]] inline ld pow_pos(ld x, ld y) noexcept {  // x > 0, x != 1, both finite
+    const dd l = log_dd(x);
+    const ld est = l.hi * y;  // overflow and underflow decided before the exact product
+    if (est > 11400.0L) return std::numeric_limits<ld>::infinity();
+    if (est < -11450.0L) return 0.0L;
+    const dd t = mul(l, y);
+    return exp_dd(t);
+}
+[[nodiscard]] inline ld pow(ld x, ld y) noexcept {
+    if (!std::isfinite(x) || !std::isfinite(y) || x == 0 || y == 0 || std::fabs(x) == 1.0L)
+        return std::pow(x, y);
+    if (x > 0) return pow_pos(x, y);
+    if (std::nearbyint(y) != y) return std::pow(x, y);  // NaN (negative base, non-integer y)
+    const ld r = pow_pos(-x, y);
+    return std::fmod(y, 2.0L) != 0 ? -r : r;
+}
+
+// ---- lgamma, tgamma ---------------------------------------------------------------
+// psi(y) to about 1e-7 relative (only multiplies the tiny rounding error of a shifted argument)
+[[nodiscard]] inline ld digamma_approx(ld y) noexcept {
+    ld acc = 0;
+    for (; y < 10.0L; y += 1.0L) acc -= 1.0L / y;
+    const ld w2 = 1.0L / (y * y);
+    return acc + std::log(y) - 0.5L / y - w2 * (1.0L / 12 - w2 * (1.0L / 120 - w2 / 252));
+}
+// log|Gamma(x)| for x >= 20: Stirling with 11 terms (error < 2^-80 there).
+[[nodiscard]] inline dd lgamma_stirling(ld x) noexcept {
+    // 1/(12 x) double-length, then w^3 (B4/12 + B6/30 w^2 + ...) in long double
+    const ld w = 1.0L / x, w2 = w * w;
+    const dd series = add(div({1.0L, 0.0L}, two_prod(12.0L, x)), w * w2 * horner(k_stirling_tail, w2));
+    dd t = mul(two_sum(x, -0.5L), log_dd(x));
+    t = add(add(t, -x), k_hl2pi);
+    return add(t, series);
+}
+// log Gamma(x) for x > 0 finite, double-length (absolute error about 2^-80; relative next to
+// the zeros at 1 and 2, where the Taylor series are used).
+[[nodiscard]] inline dd lgamma_pos(ld x) noexcept {
+    if (std::fabs(x - 1.0L) <= 0.2L) {  // lgamma(1 + z) = -gamma z + zeta(2)/2 z^2 - ...
+        const ld z = x - 1.0L;             // exact
+        dd s = add(mul(k_egamma, -z), mul(two_prod(z, z), k_zeta2h.hi));
+        s = add(s, z * z * k_zeta2h.lo + z * z * z * horner(k_lg1, z));
+        return s;
+    }
+    if (std::fabs(x - 2.0L) <= 0.2L) {  // lgamma(2 + z) = (1 - gamma) z + (zeta(2) - 1)/2 z^2 - ...
+        const ld z = x - 2.0L;
+        dd s = add(mul(k_1mgamma, z), mul(two_prod(z, z), k_zeta2m1h.hi));
+        s = add(s, z * z * k_zeta2m1h.lo + z * z * z * horner(k_lg2, z));
+        return s;
+    }
+    if (x >= 20.0L) return lgamma_stirling(x);
+    // lgamma(x) = lgamma(x + n) - log(x (x + 1) ... (x + n - 1)), x + n >= 20
+    const int n = static_cast<int>(std::ceil(20.0L - x));
+    dd prod{x, 0.0L};
+    for (int i = 1; i < n; ++i) prod = mul(prod, two_sum(x, static_cast<ld>(i)));
+    const dd y = two_sum(x, static_cast<ld>(n));  // x + n, exactly
+    dd lg = lgamma_stirling(y.hi);
+    // y.lo psi(y.hi), psi(y) ~ log y - 1/(2y) (y >= 20, |y.lo| <= 2^-59)
+    lg = add(lg, y.lo * digamma_approx(y.hi));
+    return add(lg, neg(log_dd(prod)));
+}
+// x < 0, not an integer: lgamma(x) = log pi - log|sin(pi x)| - lgamma(1 - x); sign of Gamma.
+[[nodiscard]] inline dd lgamma_neg(ld x, int& sign) noexcept {
+    const ld n = std::nearbyint(x), a = x - n;  // exact, |a| <= 1/2
+    const dd s = sinpi_dd(a);                   // sin(pi x) = (-1)^n sin(pi a)
+    const bool odd = std::fmod(n, 2.0L) != 0;
+    sign = ((s.hi < 0) != odd) ? -1 : 1;
+    const dd y = two_sum(1.0L, -x);  // 1 - x
+    dd lg = lgamma_pos(y.hi);
+    if (y.lo != 0) lg = add(lg, y.lo * digamma_approx(y.hi));
+    const dd ls = log_dd(s.hi < 0 ? neg(s) : s);
+    return add(add(k_logpi, neg(ls)), neg(lg));
+}
+[[nodiscard]] inline ld lgamma(ld x) noexcept {
+    if (!std::isfinite(x) || x == 0 || (x < 0 && std::nearbyint(x) == x) || std::fabs(x) > 0x1p62L)
+        return std::lgamma(x);
+    if (std::fabs(x) < 0x1p-64L) return -round(log_dd(std::fabs(x)));  // - log|x| - gamma x
+    if (x > 0) return round(lgamma_pos(x));
+    int sign;
+    return round(lgamma_neg(x, sign));
+}
+[[nodiscard]] inline ld tgamma(ld x) noexcept {
+    if (!std::isfinite(x) || x == 0 || (x < 0 && std::nearbyint(x) == x) || x > 1756.0L || x < -0x1p62L)
+        return std::tgamma(x);
+    if (std::fabs(x) < 0x1p-16380L) return std::tgamma(x);  // 1/x, overflowing
+    if (std::fabs(x) < 0x1p-64L) return round(add(div({1.0L, 0.0L}, {x, 0.0L}), -k_egamma.hi));  // 1/x - gamma
+    if (x > 0) {
+        if (x == std::nearbyint(x) && x <= 30.0L) {  // (x - 1)!, exact while it fits
+            ld f = 1.0L;
+            bool exact = true;
+            for (int i = 2; i < static_cast<int>(x) && exact; ++i) {
+                const dd p = two_prod(f, static_cast<ld>(i));
+                exact = p.lo == 0;
+                f = p.hi;
+            }
+            if (exact) return f;
+        }
+        return exp_dd(lgamma_pos(x));
+    }
+    int sign;
+    const ld g = exp_dd(lgamma_neg(x, sign));
+    return sign < 0 ? -g : g;
+}
 }  // namespace x87
 
 // ---- overloads (preferred to the forwarders in quaternion.hpp for long double) ----
@@ -478,6 +676,19 @@ enum class trig { sin, cos, tan };
 [[nodiscard]] inline long double tan(long double x) noexcept {
     return std::isfinite(x) ? x87::trig_eval(x, x87::trig::tan) : std::tan(x);
 }
+[[nodiscard]] inline long double sinh(long double x) noexcept { return x87::sinh(x); }
+[[nodiscard]] inline long double expm1(long double x) noexcept { return x87::expm1(x); }
+[[nodiscard]] inline long double pow(long double x, long double y) noexcept { return x87::pow(x, y); }
+// pow(long double, double), pow(int, long double), ...: what std::pow computes for these (both
+// arguments converted to long double); without this the forwarder would be the better match.
+template <class A, class B>
+    requires std::is_arithmetic_v<A> && std::is_arithmetic_v<B> && (!std::is_same_v<A, B>) &&
+             (std::is_same_v<A, long double> || std::is_same_v<B, long double>)
+[[nodiscard]] inline long double pow(A x, B y) noexcept {
+    return x87::pow(static_cast<long double>(x), static_cast<long double>(y));
+}
+[[nodiscard]] inline long double tgamma(long double x) noexcept { return x87::tgamma(x); }
+[[nodiscard]] inline long double lgamma(long double x) noexcept { return x87::lgamma(x); }
 }  // namespace quat::detail::lm
 
 #endif  // QUATERNION_DETAIL_X87_LIBM_HPP
