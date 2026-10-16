@@ -1,10 +1,10 @@
-// Own long double kernels for the C library functions that Apple's x87 libm gets wrong
-// (macOS x86_64): sinl, cosl, tanl, sinhl, expm1l, powl, tgammal and lgammal, and the
+// Own long double kernels for the C library functions that Apple's x87 libm (macOS x86_64)
+// and mingw-w64's (MinGW-w64 x86_64) get wrong: sinl, cosl, tanl, sinhl, expm1l, powl, tgammal and lgammal, and the
 // std::complex<long double> functions the headers call that libc++ builds on them (exp, sin,
 // cos, sinh, cosh, sqrt and polar).  See the README, "Supported toolchains".
 //
 // Included by quaternion.hpp only when QUATERNION_X87_LIBM is 1: the default on macOS x86_64
-// (Apple Clang or LLVM clang); -DQUATERNION_X87_LIBM=1 forces it on elsewhere (CI does so on
+// (Apple Clang or LLVM clang) and MinGW-w64 x86_64; -DQUATERNION_X87_LIBM=1 forces it on elsewhere (CI does so on
 // Linux x86_64 to test it), -DQUATERNION_X87_LIBM=0 turns it off.  It adds non-template
 // overloads for long double to quat::detail::lm, which overload resolution prefers to the
 // forwarders there; nothing else changes, and other platforms never see this file.
