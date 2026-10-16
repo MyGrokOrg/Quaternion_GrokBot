@@ -159,8 +159,14 @@ TEST(special_values) {
                      -0.5L, 11356.0L, 11357.0L, -11400.0L, 1754.0L, 1755.5L, -1754.5L, -1760.5L, 0x1p-70L, -0x1p-70L};
     // NaN, infinite and zero results must be the C library's exactly; finite nonzero ones must
     // be finite and nonzero, and within 2 ulp of glibc's where the C library is glibc (Apple's
-    // are the inaccurate ones being replaced: sinl(LDBL_MAX), tgammal(1755.5), ...)
-    auto agree = [](ld a, ld b) {
+    // are the inaccurate ones being replaced: sinl(LDBL_MAX), tgammal(1755.5), ...).
+    // mingw-w64's tgammal and lgammal overflow early: tgammal(1755.5) and tgammal(-1760.5) are
+    // inf there (Gamma(1755.5) is about 8.29e4931 < LDBL_MAX, Gamma(-1760.5) underflows to -0),
+    // and so is lgammal(+-denorm_min) (11398.8); the kernels' values are checked below.
+    auto agree = [](ld a, ld b, [[maybe_unused]] bool gamma = false) {
+#if defined(__MINGW32__)
+        if (gamma && std::isinf(b) && !std::isnan(a)) return true;
+#endif
         if (std::isnan(b) || std::isinf(b) || b == 0) return (std::isnan(a) && std::isnan(b)) || same_bits(a, b);
 #if defined(__GLIBC__)
         return std::isfinite(a) && a != 0 && ulps(a, b) <= 2.0L;
@@ -171,8 +177,9 @@ TEST(special_values) {
     for (const char* f : {"sin", "cos", "tan", "sinh", "expm1", "tgamma", "lgamma"})
         for (ld x : xs) {
             const ld a = call(f, x, 0), b = call_std(f, x, 0);
-            if (!agree(a, b)) std::fprintf(stderr, "  %s(%La) = %La, C library %La\n", f, x, a, b);
-            CHECK(agree(a, b));
+            const bool gamma = f[0] == 't' || f[0] == 'l';
+            if (!agree(a, b, gamma)) std::fprintf(stderr, "  %s(%La) = %La, C library %La\n", f, x, a, b);
+            CHECK(agree(a, b, gamma));
         }
     for (ld x : xs)
         for (ld y : xs) {
@@ -181,6 +188,11 @@ TEST(special_values) {
             CHECK(agree(a, b));
         }
     CHECK(std::signbit(lm::sin(-0.0L)) && std::signbit(lm::tan(-0.0L)) && lm::cos(-0.0L) == 1.0L);
+    // gamma next to the overflow and underflow thresholds (mpmath: Gamma(1755.5) =
+    // 8.2911e4931, ln Gamma(denorm_min) = 16445 ln 2 = 11398.805...)
+    CHECK(std::isfinite(lm::tgamma(1755.5L)) && lm::tgamma(1755.5L) > 8.291e4931L && lm::tgamma(1755.5L) < 8.292e4931L);
+    CHECK(lm::tgamma(-1760.5L) == 0 && std::signbit(lm::tgamma(-1760.5L)));
+    CHECK(std::abs(lm::lgamma(tiny) - 11398.805L) < 0.001L && lm::lgamma(-tiny) == lm::lgamma(tiny));
     CHECK(std::signbit(lm::sinh(-0.0L)) && std::signbit(lm::expm1(-0.0L)));
     CHECK(lm::pow(-2.0L, 3) == -8.0L && lm::pow(2, 0.5L) == lm::pow(2.0L, 0.5L));
 }
