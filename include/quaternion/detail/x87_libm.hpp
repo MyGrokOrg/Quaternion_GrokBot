@@ -1,6 +1,7 @@
 // Own long double kernels for the C library functions that Apple's x87 libm gets wrong
-// (macOS x86_64): sinl, cosl, tanl, sinhl, expm1l, powl, tgammal and lgammal.  See the
-// README, "Supported toolchains".
+// (macOS x86_64): sinl, cosl, tanl, sinhl, expm1l, powl, tgammal and lgammal, and the
+// std::complex<long double> functions the headers call that libc++ builds on them (exp, sin,
+// cos, sinh, cosh, sqrt and polar).  See the README, "Supported toolchains".
 //
 // Included by quaternion.hpp only when QUATERNION_X87_LIBM is 1 (off by default for now;
 // -DQUATERNION_X87_LIBM=1 forces it on, e.g. on Linux x86_64 for testing).  It adds non-template
@@ -689,6 +690,47 @@ template <class A, class B>
 }
 [[nodiscard]] inline long double tgamma(long double x) noexcept { return x87::tgamma(x); }
 [[nodiscard]] inline long double lgamma(long double x) noexcept { return x87::lgamma(x); }
+
+// ---- std::complex<long double> -----------------------------------------------------
+// libc++ builds these on sinl, cosl and sinhl.  For finite arguments, the same formulas as
+// libc++ with the functions above; non-finite arguments (whose special cases need no accurate
+// sin or cos) go to std:: unchanged.
+using cld = std::complex<long double>;
+namespace x87 {
+[[nodiscard]] inline bool finite(const std::complex<ld>& z) noexcept { return std::isfinite(z.real()) && std::isfinite(z.imag()); }
+}  // namespace x87
+[[nodiscard]] inline cld polar(long double rho, long double theta) noexcept {
+    if (!std::isfinite(rho) || !std::isfinite(theta) || std::signbit(rho)) return std::polar(rho, theta);
+    return {rho * lm::cos(theta), rho * lm::sin(theta)};
+}
+[[nodiscard]] inline cld exp(const cld& z) noexcept {
+    if (!x87::finite(z)) return std::exp(z);
+    if (z.imag() == 0) return {std::exp(z.real()), z.imag()};
+    const long double e = std::exp(z.real());
+    return {e * lm::cos(z.imag()), e * lm::sin(z.imag())};
+}
+[[nodiscard]] inline cld sinh(const cld& z) noexcept {
+    if (!x87::finite(z)) return std::sinh(z);
+    return {lm::sinh(z.real()) * lm::cos(z.imag()), std::cosh(z.real()) * lm::sin(z.imag())};
+}
+[[nodiscard]] inline cld cosh(const cld& z) noexcept {
+    if (!x87::finite(z)) return std::cosh(z);
+    if (z.real() == 0 && z.imag() == 0) return {1.0L, z.imag()};
+    return {std::cosh(z.real()) * lm::cos(z.imag()), lm::sinh(z.real()) * lm::sin(z.imag())};
+}
+[[nodiscard]] inline cld sin(const cld& z) noexcept {  // -i sinh(i z)
+    if (!x87::finite(z)) return std::sin(z);
+    const cld w = lm::sinh(cld(-z.imag(), z.real()));
+    return {w.imag(), -w.real()};
+}
+[[nodiscard]] inline cld cos(const cld& z) noexcept {  // cosh(i z)
+    if (!x87::finite(z)) return std::cos(z);
+    return lm::cosh(cld(-z.imag(), z.real()));
+}
+[[nodiscard]] inline cld sqrt(const cld& z) noexcept {
+    if (!x87::finite(z)) return std::sqrt(z);
+    return lm::polar(std::sqrt(std::abs(z)), std::arg(z) / 2.0L);
+}
 }  // namespace quat::detail::lm
 
 #endif  // QUATERNION_DETAIL_X87_LIBM_HPP

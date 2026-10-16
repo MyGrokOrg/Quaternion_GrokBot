@@ -1,7 +1,8 @@
 // The library's own x87 long double kernels (QUATERNION_X87_LIBM, quaternion/detail/x87_libm.hpp).
 // Built everywhere; the checks run only where the macro is on (CI forces it on Linux x86_64
 // with -DQUATERNION_X87_LIBM=1, and it is the default on macOS x86_64).
-//  * every function against correctly rounded mpmath references (tests/x87_refs.inc): the
+//  * every function against correctly rounded mpmath references (tests/x87_refs.inc, and
+//    tests/x87_crefs.inc for the std::complex<long double> overloads, normwise): the
 //    result must be the reference or a neighbour (error below 1 ulp; the kernels measure about 0.5), and the share that is
 //    exactly the reference is printed;
 //  * special values (+-0, +-inf, NaN) behave as the C library's;
@@ -28,6 +29,23 @@ constexpr ld inf = std::numeric_limits<ld>::infinity();
 const ref refs[] = {
 #include "x87_refs.inc"
 };
+struct cref {
+    const char* f;
+    ld xr, xi, rr, ri;
+};
+const cref crefs[] = {
+#include "x87_crefs.inc"
+};
+using cld = std::complex<ld>;
+cld ccall(std::string_view f, cld z) {
+    if (f == "exp") return lm::exp(z);
+    if (f == "sin") return lm::sin(z);
+    if (f == "cos") return lm::cos(z);
+    if (f == "sinh") return lm::sinh(z);
+    if (f == "cosh") return lm::cosh(z);
+    if (f == "sqrt") return lm::sqrt(z);
+    return {};
+}
 
 ld call(std::string_view f, ld x, [[maybe_unused]] ld y) {
     if (f == "sin") return lm::sin(x);
@@ -88,6 +106,52 @@ TEST(mpmath_references) {
                     static_cast<int>(s[i].f.size()), s[i].f.data(), s[i].n, s[i].exact);
 }
 
+TEST(complex_mpmath_references) {
+    // normwise error |w - ref| / |ref| in x87 ulps (2^-63): the libc++ formulas (e^x cos y, ...)
+    // round twice per part and polar adds the error of abs and arg, so a few ulp; bound 4
+    struct st { std::string_view f; int n = 0; ld worst = 0; };
+    st s[8];
+    int ns = 0;
+    for (const cref& t : crefs) {
+        const cld w = ccall(t.f, cld(t.xr, t.xi)), r(t.rr, t.ri);
+        const ld d = std::abs(w - r) / std::abs(r) / 0x1p-63L;
+        if (!(d <= 4.0L))
+            std::fprintf(stderr, "  %s(%La, %La) = (%La, %La), reference (%La, %La): %Lg ulp\n", t.f, t.xr, t.xi, w.real(),
+                         w.imag(), t.rr, t.ri, d);
+        CHECK(d <= 4.0L);
+        int i = 0;
+        while (i < ns && s[i].f != t.f) ++i;
+        if (i == ns) s[ns++].f = t.f;
+        ++s[i].n;
+        s[i].worst = std::max(s[i].worst, d);
+    }
+    for (int i = 0; i < ns; ++i)
+        std::printf("  complex %-5.*s %4d references, worst %.3Lg ulp (normwise)\n", static_cast<int>(s[i].f.size()),
+                    s[i].f.data(), s[i].n, s[i].worst);
+}
+
+TEST(complex_special_values) {
+    // non-finite arguments go to std:: unchanged; finite ones follow the libc++ formulas
+    const ld nan = std::numeric_limits<ld>::quiet_NaN();
+    const ld parts[] = {0.0L, -0.0L, 1.5L, -2.0L, inf, -inf, nan};
+    auto same = [](cld a, cld b) {
+        auto eq = [](ld p, ld q) { return (std::isnan(p) && std::isnan(q)) || same_bits(p, q); };
+        return eq(a.real(), b.real()) && eq(a.imag(), b.imag());
+    };
+    for (ld a : parts)
+        for (ld b : parts) {
+            const cld z(a, b);
+            if (std::isfinite(a) && std::isfinite(b)) continue;
+            CHECK(same(lm::exp(z), std::exp(z)) && same(lm::sin(z), std::sin(z)) && same(lm::cos(z), std::cos(z)));
+            CHECK(same(lm::sinh(z), std::sinh(z)) && same(lm::cosh(z), std::cosh(z)) && same(lm::sqrt(z), std::sqrt(z)));
+        }
+    CHECK(same(lm::exp(cld(1.0L, -0.0L)), cld(std::exp(1.0L), -0.0L)));
+    CHECK(same(lm::cosh(cld(0.0L, -0.0L)), cld(1.0L, -0.0L)) && same(lm::cos(cld(-0.0L, 0.0L)), cld(1.0L, -0.0L)));
+    CHECK(same(lm::sin(cld(-0.0L, 0.0L)), cld(-0.0L, 0.0L)) && same(lm::sqrt(cld(-4.0L, 0.0L)), cld(lm::polar(2.0L, lm::x87::k_pio2.hi))));
+    const ld y = 0x1.921fb54442d18469p+0L * 1e8L;
+    CHECK(same(lm::exp(cld(0.5L, y)), cld(std::exp(0.5L) * lm::cos(y), std::exp(0.5L) * lm::sin(y))));
+}
+
 TEST(special_values) {
     const ld nan = std::numeric_limits<ld>::quiet_NaN(), big = std::numeric_limits<ld>::max();
     const ld tiny = std::numeric_limits<ld>::denorm_min(), mn = std::numeric_limits<ld>::min();
@@ -124,6 +188,7 @@ TEST(overloads_are_used) {
     // ... and the library's functions go through them: sin(a + 0 i) for a quaternion
     const quat::quaternion<ld> q(x, 0, 0, 0);
     CHECK(same_bits(quat::sin(q).w(), lm::sin(x)));
+    static_assert(std::is_same_v<decltype(lm::exp(std::complex<ld>(1.0L, 2.0L))), std::complex<ld>>);
 }
 
 #if defined(__GLIBC__)

@@ -25,7 +25,8 @@
 #include <utility>
 
 // QUATERNION_X87_LIBM: 1 = use the library's own long double sin, cos, tan, sinh, expm1, pow,
-// tgamma and lgamma (quaternion/detail/x87_libm.hpp) instead of the C library's; needs the x87 80-bit long double
+// tgamma and lgamma, and complex<long double> exp, sin, cos, sinh, cosh, sqrt and polar on top
+// of them (quaternion/detail/x87_libm.hpp), instead of the C and C++ libraries'; needs the x87 80-bit long double
 // (x86_64, GCC or Clang).  Off (0) by default for now; -DQUATERNION_X87_LIBM=1 forces it on, which
 // CI does on Linux to test it.  See the README, "Configuration macros".
 #ifndef QUATERNION_X87_LIBM
