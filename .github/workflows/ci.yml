@@ -356,7 +356,12 @@ jobs:
       - name: Build
         run: cmake --build build -j 4
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          ctest --test-dir build --output-on-failure
+          # informational: accuracy figures, the C library's hypot, the x87 kernels vs mpmath
+          ./build/test_special2 | grep -E 'accuracy limits|real axis' || true
+          ./build/test_constexpr | grep -E 'hypot|differs' || true
+          ./build/test_x87_libm | grep -E 'references|nothing to test' || true
 
   mingw:
     # MinGW-w64 GCC (MSYS2 UCRT64) on Windows x64: libstdc++, x87 80-bit long double, and
@@ -384,7 +389,12 @@ jobs:
       - name: Build
         run: cmake --build build
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          ctest --test-dir build --output-on-failure
+          # informational: accuracy figures, the C library's hypot, the x87 kernels vs mpmath
+          ./build/test_special2.exe | grep -E 'accuracy limits|real axis' || true
+          ./build/test_constexpr.exe | grep -E 'hypot|differs' || true
+          ./build/test_x87_libm.exe | grep -E 'references' || true
 
   bitident-haswell:
     # Runtime results of the transcendental-free operations must not change with the
