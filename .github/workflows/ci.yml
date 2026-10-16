@@ -139,7 +139,7 @@ jobs:
 
   macos:
     # Apple Clang (Xcode, with the SDK's libc++) and Homebrew LLVM clang (with its own libc++),
-    # arm64 on macos-latest (Apple Silicon) and x86_64 on macos-15-intel.  long double is
+    # arm64 on macos-latest (Apple Silicon) and x86_64 on macos-15-intel and macos-26-intel.  long double is
     # double on Apple arm64 and x87 80-bit on x86_64.  AArch64 Clang contracts a*b+c into fma
     # by default (-ffp-contract=on); x86_64 without -march has no fma.
     runs-on: ${{ matrix.runner }}
@@ -154,6 +154,10 @@ jobs:
           - { name: apple-clang x86_64, runner: macos-15-intel, build_type: Debug }
           - { name: apple-clang x86_64, runner: macos-15-intel, build_type: Release }
           - { name: llvm-clang x86_64, runner: macos-15-intel, build_type: Release, brew: true }
+          # macOS 26 on x86_64 (GA 2026-02-26), next to macos-15-intel until that image's
+          # retirement (announced for August 2027).
+          - { name: apple-clang x86_64 macos-26, runner: macos-26-intel, build_type: Debug }
+          - { name: apple-clang x86_64 macos-26, runner: macos-26-intel, build_type: Release }
     name: ${{ matrix.name }} (${{ matrix.build_type }})
     steps:
       - uses: actions/checkout@v5
@@ -189,14 +193,15 @@ jobs:
     # tests/bitident/dump.cpp with Apple Clang and Homebrew LLVM clang (plain, and with and
     # without FMA contraction) against this header and the pre-constexpr one, and compares the
     # bits (old vs new, vs the Linux golden hashes, and across the builds).
-    name: bit-identity (macos ${{ matrix.arch }})
+    name: bit-identity (macos ${{ matrix.arch }}${{ matrix.suffix }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: arm64, runner: macos-latest }
-          - { arch: x86_64, runner: macos-15-intel }
+          - { arch: arm64, runner: macos-latest, suffix: '' }
+          - { arch: x86_64, runner: macos-15-intel, suffix: '' }
+          - { arch: x86_64, runner: macos-26-intel, suffix: ' macos-26' }
     env:
       BASELINE: 91cad1a
     steps:
