@@ -2,6 +2,22 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## Wider macOS and Windows testing: sanitizers, GCC on macOS, MinGW-w64, benchmarks
+
+Details are in the README section *Supported toolchains* and under *Benchmarks*.
+
+* **CI.** New jobs (CI now has 55, 41 before): *sanitizers* (ASan + UBSan, Debug) with Apple Clang and Homebrew LLVM clang on macOS arm64 and x86_64 (4); *asan* with MSVC x64 Debug and Release, MSVC ARM64 Release and clang-cl x64 Release (4); *gcc* with Homebrew GCC 16.2 and libstdc++ on macOS arm64 and x86_64, Debug and Release (4); *mingw-w64 gcc* (MSYS2 UCRT64, GCC 16.2) Debug and Release (2). All 11 test suites pass in all of them ([run 38979985620](https://github.com/MyGrokOrg/Quaternion_GrokBot/actions/runs/38979985620)). The existing jobs and every existing golden hash are unchanged.
+* **New workflow *Benchmarks (macOS, Windows, Linux)*** (`.github/workflows/bench.yml`): manual, weekly and on pull requests that change it or `bench/`; Linux GCC 14, macOS arm64 and x86_64 Apple Clang, macOS arm64 GCC, Windows x64 MSVC and clang-cl, Windows ARM64 MSVC, MinGW-w64 GCC. Indicative only; never fails on a timing.
+* **Fix: `sin`/`cos` with a −0 real part under GCC on macOS** (no other build changes). Darwin's libm has no `sincos`, so GCC 16 turned `std::sin(x)` and `std::cos(x)` of the same `x` into one call of Apple's `cexp(i x)`, which returns +0 for `sin(-0)` (CI probe: signbit 0 for the pair, 1 for a lone `sin`). Before: `test_annexg` failed in GCC Release builds, 156 checks on x86_64 (92 float, 64 double) and 92 on arm64 (float), all Annex G `sin`/`cos` with real part −0. After: 0. `detail::lm::sin`/`cos` keep the two calls apart for GCC on Apple platforms.
+* **`QUATERNION_X87_LIBM` on by default on MinGW-w64 x86_64.** mingw-w64's x87 long double functions are inaccurate like Apple's. Before (first MinGW run, [38976794529](https://github.com/MyGrokOrg/Quaternion_GrokBot/actions/runs/38976794529)): `test_special2` failed 16 long double checks (`riemann_zeta` 11, `tgamma` 3, `cyl_neumann` 1, `cyl_bessel_j` 1; worst `riemann_zeta` 5.76e3 ε). After: all pass; long double accuracy limits worst 257 ε (`cyl_bessel_j`), real axis vs mpmath worst 23.4 ε (`expint`), the same as GCC on macOS x86_64; the kernels' mpmath figures are those of Linux (e.g. `sin` 679 of 680 references correctly rounded, `lgamma` 640 of 640).
+* **Fix: benchmark timing on Windows.** `bench/bench.cpp` counted calls in a `long`, 32 bits on Windows, and its limit `1L << 40` overflowed, so every case ran once (all MSVC, clang-cl and MinGW rows had `calls` 1, double `mul` 4200, 300 and 3400 ns; run 38978843263). After (run [38979985627](https://github.com/MyGrokOrg/Quaternion_GrokBot/actions/runs/38979985627)): double `mul` 11.5 (MSVC x64), 4.8 (clang-cl x64), 5.9 (MSVC ARM64), 6.8 ns (MinGW); Linux GCC 5.9 ns.
+* **Fix (tests): undefined behaviour found by UBSan on macOS.** `test_special2` converted negative orders (−1.5) to `unsigned`; negative orders now map to 0 (only the integer-order functions use the value). GCC's UBSan on Linux does not check float-to-integer overflow.
+* **Tests, platform entries.**
+  * `QTEST_FP_CONTRACT` now also covers GCC on ARM64, which contracts by default: in GCC Release on macOS arm64, 30 of the 45 golden hashes differed (10 each for float, double and long double, which is double there; the commit message of ebd196d says 20 of 30, which is wrong).
+  * MinGW-w64: new golden entries `long_double@mingw` for `abs` and `normalize` (mingw-w64's `hypotl` differs from a correctly rounded one in 33,548 of 200,000 inputs, 373 by more than 1 ulp, which is no longer a failure there); double uses the existing `double@ucrt` entries. `test_special` compares libstdc++'s complex inverse functions (from mingw-w64, off by up to 323 ε near 0) at 1e-12, as on macOS. `test_x87_libm` accepts mingw-w64's early overflow of `tgammal`/`lgammal` and checks the kernels' `tgamma(1755.5)`, `tgamma(-1760.5)` and `lgamma(±denorm_min)` against mpmath on every platform.
+  * GCC on arm64 macOS: the 1.01e-3005 reference below the binary64 range is 0 where `LDBL_MAX_EXP` is 1024 (GCC rejected the literal with `-Werror=overflow`).
+  * The example links `stdc++exp` with MinGW-w64 GCC (needed for `std::print`).
+
 ## CI on macOS 26 x86_64 (`macos-26-intel`) next to `macos-15-intel`
 
 Details are in the README section *Supported toolchains* (*Intel runners and their dates*).
