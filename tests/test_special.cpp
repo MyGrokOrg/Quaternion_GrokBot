@@ -180,6 +180,10 @@ template <class T> void inverse_functions() {
     // hypot is not correctly rounded, so near 0 the reference itself is off by up to 387 eps
     // (asinh at 0.001 + 0.002i; the quaternion result agrees with the long double reference).
     const T ref_tol = std::is_same_v<T, float> ? tol : T(1e-12);
+#elif defined(__MINGW32__)
+    // libstdc++ takes these from mingw-w64's casinh etc., which are off by up to 323 eps near 0
+    // in double (at 0.001 + 0.002i); the quaternion result is not the inaccurate one.
+    const T ref_tol = std::is_same_v<T, float> ? tol : T(1e-12);
 #elif defined(_LIBCPP_VERSION)
     // libc++ evaluates the complex<long double> inverse functions with double-precision
     // division, so as a reference it is only good to about 1e-13.

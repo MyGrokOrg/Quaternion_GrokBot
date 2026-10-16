@@ -58,3 +58,6 @@
 {"double@macos-x86_64", "normalize", 0x2aaa621351e38aa0ULL},
 {"long_double@macos-x86_64", "abs", 0x2a2cdc1ea54797ecULL},
 {"long_double@macos-x86_64", "normalize", 0x5241abcaf2066dd4ULL},
+// mingw-w64 hypotl (long double; MinGW-w64 GCC, UCRT64).  Its double hypot is the Universal CRT's (@ucrt).
+{"long_double@mingw", "abs", 0x3e265d1be0bbe017ULL},
+{"long_double@mingw", "normalize", 0x094f42ef4fb6556fULL},

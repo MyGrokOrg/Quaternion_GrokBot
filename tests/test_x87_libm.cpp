@@ -276,9 +276,9 @@ TEST(random_vs_glibc) {
 #endif
 
 #else
-#if defined(__APPLE__) && defined(__x86_64__) && !defined(QUATERNION_TEST_X87_OFF_OK)
-// the default on macOS x86_64 is on; a build that turns it off must say so
-static_assert(false, "QUATERNION_X87_LIBM is 0 on macOS x86_64: define QUATERNION_TEST_X87_OFF_OK to build the tests anyway");
+#if (defined(__APPLE__) || defined(__MINGW32__)) && defined(__x86_64__) && !defined(QUATERNION_TEST_X87_OFF_OK)
+// the default on macOS x86_64 and MinGW-w64 x86_64 is on; a build that turns it off must say so
+static_assert(false, "QUATERNION_X87_LIBM is 0 on macOS/MinGW x86_64: define QUATERNION_TEST_X87_OFF_OK to build the tests anyway");
 #endif
 TEST(skipped) { std::printf("  QUATERNION_X87_LIBM is 0 in this build: nothing to test\n"); }
 #endif

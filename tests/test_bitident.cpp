@@ -19,7 +19,8 @@ struct golden { const char* type; const char* op; std::uint64_t hash; };
 // abs and normalize call the C library's hypot.  The goldens are glibc's; the Universal CRT
 // (MSVC, clang-cl) rounds hypot differently, so Windows has its own hashes for those two
 // ("<type>@ucrt" entries in golden.inc; "<type>@ucrt-arm64" on ARM64), and so does macOS's
-// libm ("<type>@macos-arm64", "<type>@macos-x86_64").
+// libm ("<type>@macos-arm64", "<type>@macos-x86_64"), and so does mingw-w64's hypotl
+// ("long_double@mingw"; MinGW's double hypot is the Universal CRT's).
 [[maybe_unused]] static bool uses_libm_hypot(const std::string& op) { return op == "abs" || op == "normalize"; }
 
 template <class T>
@@ -37,6 +38,8 @@ void check(const char* tname) {
         const char* crt = "@macos-arm64";
 #elif defined(__APPLE__)
         const char* crt = "@macos-x86_64";
+#elif defined(__MINGW32__)
+        const char* crt = std::is_same_v<T, long double> ? "@mingw" : "@ucrt";
 #elif defined(_M_ARM64)
         const char* crt = "@ucrt-arm64";
 #else

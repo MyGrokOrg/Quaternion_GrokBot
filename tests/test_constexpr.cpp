@@ -115,8 +115,9 @@ template <class T> void constexpr_vs_runtime() {
     // abs: std::hypot (libm) at run time vs a correctly rounded hypot in constant evaluation.
     // Each difference is at most 1 ulp.  glibc's hypot differs from the correctly rounded one
     // rarely (<= 16 of these 256); the Universal CRT's (Windows) far more often.
-    // macOS: also more often (libm hypot), and x86_64 hypotl by more than 1 ulp at times.
-#if defined(__APPLE__) && !defined(__aarch64__)
+    // macOS: also more often (libm hypot), and x86_64 hypotl by more than 1 ulp at times; so
+    // does mingw-w64's hypotl.
+#if (defined(__APPLE__) && !defined(__aarch64__)) || defined(__MINGW32__)
     if (!std::is_same_v<T, long double>) CHECK(abs_far == 0);
 #else
     CHECK(abs_far == 0);
@@ -152,13 +153,19 @@ template <class T> void helpers_vs_std() {
         // differences must be at most one ulp
         bad_hyp += !(h1 == h2 || std::nextafter(h1, h2) == h2);
     }
+#if defined(__MINGW32__)
+    // mingw-w64's hypotl is off by more than 1 ulp at times (reported below)
+    const bool hyp_1ulp = !std::is_same_v<T, long double>;
+#else
+    const bool hyp_1ulp = true;
+#endif
     CHECK(bad_scal == 0);
     CHECK(bad_logb == 0);
     CHECK(bad_frexp == 0);
     CHECK(bad_sqrt == 0);
-    CHECK(bad_hyp == 0);
-    std::printf("  [%s] %d inputs: scalbn/logb/frexp/sqrt identical to std::; hypot differs from std::hypot in %d (each by 1 ulp)\n",
-                qtest::current_type, n, hyp_diff);
+    if (hyp_1ulp) CHECK(bad_hyp == 0);
+    std::printf("  [%s] %d inputs: scalbn/logb/frexp/sqrt identical to std::; hypot differs from std::hypot in %d (%d by more than 1 ulp)\n",
+                qtest::current_type, n, hyp_diff, bad_hyp);
 }
 TEST(cx_helpers_match_std) { FOR_EACH_TYPE(helpers_vs_std); }
 
