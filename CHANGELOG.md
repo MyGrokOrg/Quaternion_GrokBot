@@ -2,6 +2,15 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## macOS x86_64 `long double`: the library's own kernels (in progress; nothing changes on any platform yet)
+
+Errors in x87 ulps (2⁻⁶³ relative) against mpmath. The plan is in the next section, *Planned fix*.
+
+* **Routing layer.** The headers now call `sin`, `cos`, `tan`, `sinh`, `cosh`, `exp`, `expm1`, `pow`, `tgamma`, `lgamma`, `polar` and `sqrt` through `quat::detail::lm`, which forwards to `std::` (no change: the bit-identity jobs pass, and the fuzz evaluator gives the same bits on 12,800 inputs, 64 functions × 200, seed 7, double and long double, GCC 14 and Clang 19 libc++).
+* **New macro `QUATERNION_X87_LIBM`** (README, *Configuration macros*): 1 includes the new `quaternion/detail/x87_libm.hpp`, the library's own x87 long double `sin`, `cos` and `tan`; 0 (the default everywhere for now) leaves the header out. It needs the x87 80-bit `long double` (x86_64, GCC or Clang) and stops with `#error` otherwise. Argument reduction is Payne–Hanek in integer arithmetic for |x| > π/4 (256 bits of 2/π from a 16,768-bit table, so every finite argument is reduced to within 2⁻¹⁹⁰ of a quadrant), then double-length Taylor kernels.
+* **Accuracy** (Linux x86_64, GCC 14; the same on Clang 19 libc++): against 680 correctly rounded mpmath references per function (new `tests/x87_refs.inc`, `tests/gen/gen_x87_refs.py`, seed 20261016: random significands with |x| from 2⁻⁷⁰ to 2¹⁶³⁸⁴ and points next to multiples of π/2 up to 2¹²⁰), `sin` 679, `cos` 675 and `tan` 678 are correctly rounded and the rest 1 ulp off. On 4,666 random inputs per function (seed 2, by the development script), worst errors `sin` 0.495, `cos` 0.486, `tan` 0.547, against glibc's 0.80, 0.82, 0.73. Apple's for comparison (previous section): 3.05e17, 8.35e19, 8.31e18.
+* **CI.** New test `tests/test_x87_libm.cpp` (mpmath references, special values, that the library calls the new overloads, and 20,000 seeded random inputs per function against glibc: at most 1 ulp apart for `sin` and `cos`, 2 for `tan`); it reports *skipped* where the macro is 0. New Linux jobs *gcc-14 x87-libm* and *clang-19-libcxx x87-libm*, Debug and Release, build everything with `-DQUATERNION_X87_LIBM=1` and run all the test suites.
+
 ## macOS x86_64 `long double`: the C library limit measured in full (documentation and tools; no library change)
 
 Details are in the README section *Supported toolchains*. Errors in x87 ulps (2⁻⁶³ relative) against mpmath.

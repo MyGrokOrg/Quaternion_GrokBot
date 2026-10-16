@@ -18,6 +18,10 @@ jobs:
           - { name: clang-18-libcxx, cxx: clang++-18, flags: "-stdlib=libc++" }
           - { name: clang-19-libstdcxx, cxx: clang++-19, flags: "", llvm: 19 }
           - { name: clang-19-libcxx, cxx: clang++-19, flags: "-stdlib=libc++", llvm: 19 }
+          # the library's own x87 long double kernels, forced on (QUATERNION_X87_LIBM, the
+          # macOS x86_64 default) and tested against mpmath and glibc (tests/test_x87_libm.cpp)
+          - { name: gcc-14 x87-libm, cxx: g++-14, flags: "-DQUATERNION_X87_LIBM=1" }
+          - { name: clang-19-libcxx x87-libm, cxx: clang++-19, flags: "-stdlib=libc++ -DQUATERNION_X87_LIBM=1", llvm: 19 }
     name: ${{ matrix.compiler.name }} (${{ matrix.build_type }})
     steps:
       - uses: actions/checkout@v5
