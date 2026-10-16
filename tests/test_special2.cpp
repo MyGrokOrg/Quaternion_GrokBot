@@ -1,6 +1,7 @@
 // Tests for the extended special functions (Bessel of real order, Airy, orthogonal
 // polynomials, elliptic integrals, exponential/sine/Fresnel integrals, polygamma,
 // Hurwitz zeta, polylogarithm, Lambert W, incomplete gamma and beta).
+#include <cfloat>
 #include "test_framework.hpp"
 #include <quaternion.hpp>
 #include <cmath>
@@ -31,6 +32,14 @@ template <class T> bool close(const quaternion<T>& got, const quaternion<T>& wan
 
 template <class T> quaternion<T> axis() { return {T(0), T(2) / 3, T(-1) / 3, T(2) / 3}; }
 template <class T> quaternion<T> on_axis(T a, T b) { return T(b) * axis<T>() + a; }
+
+// 1.01e-3005 is below the binary64 range: where long double is double (MSVC, clang-cl, Apple
+// arm64, GCC on arm64 macOS) the reference is 0, which is fine for that check.
+#if LDBL_MAX_EXP > 1024
+#define QT_TINY_E3005 1.0100402884483422538373878397469342e-3005L
+#else
+#define QT_TINY_E3005 0.0L
+#endif
 
 struct ref2 { std::string_view fn; long double p1, p2, re, im, wre, wim; };
 // Reference values computed with mpmath at 34 digits (inputs are exact binary fractions).
@@ -419,7 +428,8 @@ constexpr ref2 refs2[] = {
 template <class T>
 quaternion<T> eval2(std::string_view f, T a, T b, const quaternion<T>& q) {
     using namespace quat;
-    const auto n = static_cast<unsigned>(a);
+    // only the integer-order functions use n; a negative a is out of unsigned range (UB)
+    const auto n = a >= T(0) ? static_cast<unsigned>(a) : 0u;
     const auto k = static_cast<int>(a);
     if (f == "cyl_bessel_j") return cyl_bessel_j(a, q);
     if (f == "cyl_neumann") return cyl_neumann(a, q);
@@ -1070,14 +1080,7 @@ constexpr ref3 refs5[] = {
     {"cyl_bessel_j", 2.25L, -801.75L, -0.0L, 0.017179421357514054993189833703183212L, 0.017179421357514054993189833703183212L},
     {"cyl_bessel_j", -1.75L, 40.5L, 30.25L, 291627478796.54772776032946739486608L, 698886281091.86442747254150549642835L},
     {"cyl_bessel_j", 0L, 2500.5L, 0.5L, 0.0098248111290010705928492329073332985L, 0.006964843454613972825567457300515707L},
-#if defined(__clang__)  // below binary64 range where long double is double (clang-cl): 0, which is fine here
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wliteral-range"
-#endif
-    {"cyl_neumann", 1.5L, 317.25L, 0.0L, -0.0021362352100682438668660752810647658L, 1.0100402884483422538373878397469342e-3005L},
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
+    {"cyl_neumann", 1.5L, 317.25L, 0.0L, -0.0021362352100682438668660752810647658L, QT_TINY_E3005},
     {"cyl_neumann", -0.25L, 60.5L, -12.5L, -6738.969792593681813894805263061818L, 11840.541248157200991055003364427467L},
     {"cyl_bessel_k", 0.75L, 200.5L, 150.25L, 6.4825500260496974597398117777598273e-89L, 1.4804462684316063142167940096606194e-89L},
     {"cyl_bessel_k", 2.5L, 30.5L, -400.0L, 7.1204770355498114269356096486531486e-16L, -3.4815414880684473887162882004520364e-15L},
@@ -1153,7 +1156,7 @@ template <class T> void real_axis_mpmath() {
     std::string_view worst_fn;
     for (const auto& r : realaxis_refs) {
         const T x = static_cast<T>(r.x), p1 = static_cast<T>(r.p1), p2 = static_cast<T>(r.p2);
-        const unsigned u1 = static_cast<unsigned>(r.p1), u2 = static_cast<unsigned>(r.p2);
+        const unsigned u1 = r.p1 >= 0 ? static_cast<unsigned>(r.p1) : 0u, u2 = r.p2 >= 0 ? static_cast<unsigned>(r.p2) : 0u;
         const Q q(x);
         Q got;
         T scale = T(0);  // polynomials: absolute error relative to max(1, |want|)
