@@ -117,6 +117,25 @@ QUAT_LM_FWD(lgamma)
 QUAT_LM_FWD(polar)
 QUAT_LM_FWD(sqrt)
 #undef QUAT_LM_FWD
+#if defined(__APPLE__) && defined(__GNUC__) && !defined(__clang__)
+// GCC on macOS: Darwin's libm has no sincos, so GCC turns sin(x) and cos(x) of the same x
+// into one call of Apple's cexp(i x), which returns +0 for sin(-0) (and is not Apple's sin
+// and cos).  An empty asm statement makes each call's argument opaque, so the two calls stay
+// separate.  Only GCC on Apple platforms compiles this; everywhere else nothing changes.
+#define QUAT_LM_NO_CEXPI(T)                                                                 \
+    [[nodiscard]] constexpr T sin(T x) noexcept {                                           \
+        if consteval { return std::sin(x); } else { __asm__("" : "+g"(x)); return std::sin(x); } \
+    }                                                                                       \
+    [[nodiscard]] constexpr T cos(T x) noexcept {                                           \
+        if consteval { return std::cos(x); } else { __asm__("" : "+g"(x)); return std::cos(x); } \
+    }
+QUAT_LM_NO_CEXPI(float)
+QUAT_LM_NO_CEXPI(double)
+#if !QUATERNION_X87_LIBM
+QUAT_LM_NO_CEXPI(long double)
+#endif
+#undef QUAT_LM_NO_CEXPI
+#endif
 }  // namespace lm
 
 // ---- constexpr floating-point helpers -------------------------------------------
