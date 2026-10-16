@@ -10,10 +10,10 @@
 #include <quaternion/quaternion.hpp>
 
 // Builds whose compiler may contract a * b + c in the library into an fma: GCC/Clang with
-// FMA enabled (__FMA__, e.g. -march=haswell or clang-cl /arch:AVX2) and Clang on ARM64, where
-// FMA is baseline and contraction is on by default.  Bit-exact runtime checks are skipped
-// there.  (MSVC's /fp:contract does not count: the headers turn it off for their own code.)
-#if defined(__FMA__) || (defined(__clang__) && (defined(__aarch64__) || defined(_M_ARM64)))
+// FMA enabled (__FMA__, e.g. -march=haswell or clang-cl /arch:AVX2), and Clang and GCC on
+// ARM64, where FMA is baseline and contraction is on by default.  Bit-exact runtime checks are
+// skipped there.  (MSVC's /fp:contract does not count: the headers turn it off for their own code.)
+#if defined(__FMA__) || ((defined(__clang__) || defined(__GNUC__)) && (defined(__aarch64__) || defined(_M_ARM64)))
 #define QTEST_FP_CONTRACT 1
 #else
 #define QTEST_FP_CONTRACT 0
