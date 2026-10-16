@@ -73,6 +73,34 @@ consteval bool fp_widens() {
     else return requires(U u) { T{u}; };
 }
 
+// ---- routing of the C library's transcendental functions (detail::lm) ----------
+// The headers call these instead of std::sin, std::cos, ... (also for std::complex
+// arguments).  Each forwards to the std:: function with the same arguments, so the overload
+// chosen, the results and the code are those of the std:: call.  Where QUATERNION_X87_LIBM is
+// on (see quaternion/detail/x87_libm.hpp), that header adds non-template overloads for x87
+// long double, which overload resolution prefers.
+namespace lm {
+#define QUAT_LM_FWD(NAME)                                                                   \
+    template <class... A>                                                                   \
+    [[nodiscard]] constexpr auto NAME(const A&... a) noexcept(noexcept(std::NAME(a...)))    \
+        -> decltype(std::NAME(a...)) {                                                      \
+        return std::NAME(a...);                                                             \
+    }
+QUAT_LM_FWD(sin)
+QUAT_LM_FWD(cos)
+QUAT_LM_FWD(tan)
+QUAT_LM_FWD(sinh)
+QUAT_LM_FWD(cosh)
+QUAT_LM_FWD(exp)
+QUAT_LM_FWD(expm1)
+QUAT_LM_FWD(pow)
+QUAT_LM_FWD(tgamma)
+QUAT_LM_FWD(lgamma)
+QUAT_LM_FWD(polar)
+QUAT_LM_FWD(sqrt)
+#undef QUAT_LM_FWD
+}  // namespace lm
+
 // ---- constexpr floating-point helpers -------------------------------------------
 // <cmath> is not constexpr on Clang or libc++ before C++26 (P1383), so the
 // transcendental-free operations use these in constant evaluation.  Every runtime branch
@@ -726,7 +754,7 @@ template <class T>
     if constexpr (L::digits < 53 && std::numeric_limits<double>::digits == 53 && L::max_exponent <= 128) {
         // float: squares exact in double, sum rounded once, then sqrt and the final rounding.
         const double dx = x, dy = y, dz = z;
-        return static_cast<T>(std::sqrt(dx * dx + dy * dy + dz * dz));
+        return static_cast<T>(detail::lm::sqrt(dx * dx + dy * dy + dz * dz));
     } else {
         // Scale by 2^-e so that m is in [1, 2): no overflow, and squares of components below
         // m 2^-(digits+2) only matter beyond the last bit.
@@ -749,7 +777,7 @@ template <class T>
         two_sum(px, py, s1, e1);
         two_sum(s1, pz, s2, e2);
         const T lo = ((ex + ey) + ez) + (e1 + e2);
-        const T h = std::sqrt(s2);
+        const T h = detail::lm::sqrt(s2);
         // residual s - h^2, exactly: h^2 = hp + he
         T hp, he;
         sq(h, hp, he);
@@ -870,7 +898,7 @@ template <class T, class F>
     if (std::isinf(vl)) {
         int m = 0;
         for (T x : u) m += std::isinf(x);
-        const T c = T(1) / std::sqrt(T(m));
+        const T c = T(1) / detail::lm::sqrt(T(m));
         for (T& x : u) x = std::isinf(x) ? std::copysign(c, x) : std::isnan(x) ? x : std::copysign(T(), x);
     } else if (std::isnan(vl)) {
         for (T& x : u) x = std::isnan(x) ? T(1) : std::copysign(T(), x);
@@ -919,7 +947,7 @@ template <class T>
 /// rho * (cos(theta) + i sin(theta)) -- same as std::polar embedded on the i axis.
 template <class T>
 [[nodiscard]] inline quaternion<T> polar(const T& rho, const T& theta = T()) noexcept {
-    const T c = std::cos(theta), s = std::sin(theta);
+    const T c = detail::lm::cos(theta), s = detail::lm::sin(theta);
     // avoid inf * 0 = NaN for an infinite rho at theta = 0
     return {c == T() ? detail::zero_prod(rho, c) : rho * c,
             s == T() ? detail::zero_prod(rho, s) : rho * s, T(), T()};
@@ -928,7 +956,7 @@ template <class T>
 template <class T>
 [[nodiscard]] inline quaternion<T> polar(const T& rho, const T& theta,
                                          const quaternion<T>& axis) noexcept {
-    const T c = std::cos(theta), s = std::sin(theta);
+    const T c = detail::lm::cos(theta), s = detail::lm::sin(theta);
     return detail::along(axis, detail::vabs(axis), c == T() ? detail::zero_prod(rho, c) : rho * c,
                          s == T() ? detail::zero_prod(rho, s) : rho * s);
 }
@@ -942,8 +970,8 @@ template <class T>
 namespace detail::fin {
 template <class T>
 [[nodiscard]] inline quaternion<T> exp(const quaternion<T>& q) noexcept {
-    const T v = vabs(q), e = std::exp(q.w());
-    return along(q, v, e * std::cos(v), e * std::sin(v));
+    const T v = vabs(q), e = detail::lm::exp(q.w());
+    return along(q, v, e * detail::lm::cos(v), e * detail::lm::sin(v));
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> log(const quaternion<T>& q) noexcept {
@@ -960,20 +988,20 @@ template <class T>
     // No cancellation: the larger of Re and |Im| comes from (r + |a|)/2, the other from
     // v / (2 * larger).  (r + |a|)/2 is formed as r/2 + |a|/2 to avoid overflow.
     const T v = vabs(q), r = quat::abs(q), a = q.w();
-    const T big = std::sqrt(r / T(2) + std::abs(a) / T(2));
-    if (big == T()) return along(q, v, T(), std::sqrt(r));
+    const T big = detail::lm::sqrt(r / T(2) + std::abs(a) / T(2));
+    if (big == T()) return along(q, v, T(), detail::lm::sqrt(r));
     const T small = (v / big) / T(2);
     return a >= T() ? along(q, v, big, small) : along(q, v, small, big);
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> sinh(const quaternion<T>& q) noexcept {
     const T v = vabs(q);
-    return along(q, v, std::sinh(q.w()) * std::cos(v), std::cosh(q.w()) * std::sin(v));
+    return along(q, v, detail::lm::sinh(q.w()) * detail::lm::cos(v), detail::lm::cosh(q.w()) * detail::lm::sin(v));
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> cosh(const quaternion<T>& q) noexcept {
     const T v = vabs(q);
-    return along(q, v, std::cosh(q.w()) * std::cos(v), std::sinh(q.w()) * std::sin(v));
+    return along(q, v, detail::lm::cosh(q.w()) * detail::lm::cos(v), detail::lm::sinh(q.w()) * detail::lm::sin(v));
 }
 // Kahan's complex tanh ("Branch cuts for complex elementary functions", 1987):
 // tanh(x + i y) without overflow for any finite x, y.
@@ -981,10 +1009,10 @@ template <class T>
 [[nodiscard]] inline std::complex<T> kahan_tanh(T x, T y) noexcept {
     const T cut = T(std::numeric_limits<T>::digits + 4) * ln2_v<T> / T(2);
     if (std::abs(x) > cut) {
-        const T e = std::exp(-std::abs(x));
-        return {std::copysign(T(1), x), T(4) * std::sin(y) * std::cos(y) * e * e};
+        const T e = detail::lm::exp(-std::abs(x));
+        return {std::copysign(T(1), x), T(4) * detail::lm::sin(y) * detail::lm::cos(y) * e * e};
     }
-    const T t = std::tan(y), b = T(1) + t * t, sh = std::sinh(x), rho = std::sqrt(T(1) + sh * sh);
+    const T t = detail::lm::tan(y), b = T(1) + t * t, sh = detail::lm::sinh(x), rho = detail::lm::sqrt(T(1) + sh * sh);
     const T den = T(1) + b * sh * sh;
     return {b * rho * sh / den, t / den};
 }
@@ -997,12 +1025,12 @@ template <class T>
 template <class T>
 [[nodiscard]] inline quaternion<T> sin(const quaternion<T>& q) noexcept {
     const T v = vabs(q);
-    return along(q, v, std::sin(q.w()) * std::cosh(v), std::cos(q.w()) * std::sinh(v));
+    return along(q, v, detail::lm::sin(q.w()) * detail::lm::cosh(v), detail::lm::cos(q.w()) * detail::lm::sinh(v));
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> cos(const quaternion<T>& q) noexcept {
     const T v = vabs(q);
-    return along(q, v, std::cos(q.w()) * std::cosh(v), -std::sin(q.w()) * std::sinh(v));
+    return along(q, v, detail::lm::cos(q.w()) * detail::lm::cosh(v), -detail::lm::sin(q.w()) * detail::lm::sinh(v));
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> tan(const quaternion<T>& q) noexcept {
@@ -1037,19 +1065,19 @@ template <class T, class F>
 template <class T>
 [[nodiscard]] inline C<T> inf_cis(T y) noexcept {
     const T inf = std::numeric_limits<T>::infinity();
-    return {inf * std::cos(y), inf * std::sin(y)};
+    return {inf * detail::lm::cos(y), inf * detail::lm::sin(y)};
 }
 template <class T>
 [[nodiscard]] inline C<T> exp(T x, T y) noexcept {
     if (negy(y)) return cj(exp(x, -y));
     const T inf = std::numeric_limits<T>::infinity();
     if (fin(x)) {
-        if (y == T()) return {std::exp(x), y};
+        if (y == T()) return {detail::lm::exp(x), y};
         return fin(y) ? on_i([](const quaternion<T>& q) { return fin::exp(q); }, x, y) : nn<T>();
     }
     if (x == inf) return y == T() ? C<T>(inf, y) : fin(y) ? inf_cis(y) : C<T>(inf, y - y);
     if (x == -inf)
-        return fin(y) ? C<T>(std::copysign(T(), std::cos(y)), std::copysign(T(), std::sin(y)))
+        return fin(y) ? C<T>(std::copysign(T(), detail::lm::cos(y)), std::copysign(T(), detail::lm::sin(y)))
                       : C<T>(T(), T());
     return y == T() ? C<T>(x, y) : nn<T>();
 }
@@ -1084,7 +1112,7 @@ template <class T>
     if (x == -inf) return fin(y) ? C<T>(T(), inf) : C<T>(y, inf);
     if (x == inf) return fin(y) ? C<T>(inf, T()) : C<T>(inf, y);
     if (std::isnan(x) || std::isnan(y)) return nn<T>();
-    if (y == T()) return x >= T() ? C<T>(x == T() ? T() : std::sqrt(x), y) : C<T>(T(), std::sqrt(-x));
+    if (y == T()) return x >= T() ? C<T>(x == T() ? T() : detail::lm::sqrt(x), y) : C<T>(T(), detail::lm::sqrt(-x));
     return on_i([](const quaternion<T>& q) { return fin::sqrt(q); }, x, y);
 }
 template <class T>
@@ -1094,7 +1122,7 @@ template <class T>
     const T inf = std::numeric_limits<T>::infinity();
     if (fin(x)) {
         if (!fin(y)) return x == T() ? C<T>(x, y - y) : nn<T>();
-        if (y == T()) return {std::sinh(x), y};
+        if (y == T()) return {detail::lm::sinh(x), y};
         return on_i([](const quaternion<T>& q) { return fin::sinh(q); }, x, y);
     }
     if (x == inf) return y == T() ? C<T>(x, y) : fin(y) ? inf_cis(y) : C<T>(inf, y - y);
@@ -1107,7 +1135,7 @@ template <class T>
     const T inf = std::numeric_limits<T>::infinity();
     if (fin(x)) {
         if (!fin(y)) return x == T() ? C<T>(y - y, T()) : nn<T>();
-        if (y == T()) return {std::cosh(x), y};
+        if (y == T()) return {detail::lm::cosh(x), y};
         return on_i([](const quaternion<T>& q) { return fin::cosh(q); }, x, y);
     }
     if (x == inf) return y == T() ? C<T>(x, y) : fin(y) ? inf_cis(y) : C<T>(inf, y - y);
@@ -1123,7 +1151,7 @@ template <class T>
         if (y == T()) return {std::tanh(x), y};
         return on_i([](const quaternion<T>& q) { return fin::tanh(q); }, x, y);
     }
-    if (x == inf) return {T(1), fin(y) ? std::copysign(T(), std::sin(T(2) * y)) : T()};
+    if (x == inf) return {T(1), fin(y) ? std::copysign(T(), detail::lm::sin(T(2) * y)) : T()};
     return y == T() ? C<T>(x, y) : nn<T>();
 }
 // f(z) = -i g(i z): with g(-y + i x) = R + i I, f = I - i R (exact)
