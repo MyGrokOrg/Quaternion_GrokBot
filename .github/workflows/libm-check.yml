@@ -45,6 +45,7 @@ jobs:
       - name: Build and run
         run: |
           uname -m; (sw_vers 2>/dev/null || ldd --version | head -1)
+          (sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 'model name' /proc/cpuinfo)  # x87 last bits vary by CPU
           if [ "$RUNNER_OS" = macOS ]; then CXX=$(xcrun -f clang++); else CXX=g++-14; fi
           $CXX --version | head -1
           SYS=""; [ "$RUNNER_OS" = macOS ] && SYS="-isysroot $(xcrun --show-sdk-path)"
