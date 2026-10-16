@@ -6,7 +6,7 @@ Accuracy figures are worst-case errors against mpmath on random exact inputs (30
 
 Details are in the README section *Supported toolchains*. Errors in x87 ulps (2⁻⁶³ relative) against mpmath.
 
-* **Measured.** New `fuzz/libm_check_full.cpp`/`.py` check every rounded long double C library function the headers call, on several ranges (seed 12, 300 inputs per function and range; the inputs are built without libm, so every platform gets the same ones). On `macos-15-intel` (Apple Clang 17) eight are inaccurate; glibc 2.39 on the same inputs in parentheses (from one `ubuntu-24.04` run; glibc's x87-instruction results differ in the last bit between runner CPUs, by at most 1.21 ulp in total on a second run):
+* **Measured.** New `fuzz/libm_check_full.cpp`/`.py` check every rounded long double C library function the headers call, on several ranges (seed 12, 300 inputs per function and range; the inputs are built without libm, so every platform gets the same ones). On `macos-15-intel` (Apple Clang 17) eight are inaccurate; glibc 2.39 on the same inputs in parentheses (from one `ubuntu-24.04` run; glibc's x87-instruction results differ in the last bit between runner CPUs; on a second run 296 of 13,800 results differed and the worst errors moved by at most 0.32 ulp):
   * `sinl` 137 (|x| ≤ 4, next to π; 0.67), 2.06e3 (|x| ≤ 700; 0.72), 3.05e17 (2¹⁰ ≤ |x| < 2⁶³, all 300 off by more than 1 ulp; 0.69); `cosl` 1.94, 902, 8.35e19 (0.61, 0.52, 0.67); `tanl` 137, 2.06e3, 8.31e18 (0.63, 0.65, 0.65).
   * `sinhl` 17.4 (|x| ≤ 40; 0.91) and 4.49e3 (|x| ≤ 11000; 0.61). `expm1l` 16.2 (|x| ≤ 40; 0.95).
   * `powl` 16.4 (bases [0.5, 3), exponents [−40, 40]; 0.53), 36.6 (integer bases 2…1000, exponents [−60, 0]; 0.54), 217 (bases 2^±20, exponents [−500, 500]; 0.50).
