@@ -306,8 +306,8 @@ jobs:
             "PATH=$msvc\bin\$h;$env:PATH" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
             $lflags = ""
           }
-          $env:CXXFLAGS = "/fsanitize=address"
-          cmake -B build -A ${{ matrix.arch }} ${{ matrix.toolset }} "-DCMAKE_CXX_FLAGS_DEBUG=/Zi /Ob0 /Od" "-DCMAKE_EXE_LINKER_FLAGS=$lflags" "-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/debug /INCREMENTAL:NO"
+          $env:CXXFLAGS = "/fsanitize=address /Zi"
+          cmake -B build -A ${{ matrix.arch }} ${{ matrix.toolset }} -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -DCMAKE_TRY_COMPILE_CONFIGURATION=Release "-DCMAKE_CXX_FLAGS_DEBUG=/Zi /Ob0 /Od" "-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /INCREMENTAL:NO $lflags" "-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/DEBUG /INCREMENTAL:NO"
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} -j
       - name: Test
@@ -335,6 +335,22 @@ jobs:
           gxx=$(ls $(brew --prefix gcc)/bin/g++-[0-9]* | sort -V | tail -1)
           echo "CXX=$gxx" >> $GITHUB_ENV
           $gxx --version | head -1
+      - name: Sign of zero probe (informational)
+        run: |
+          cat > probe.cpp <<'X'
+          #include <cmath>
+          #include <cstdio>
+          volatile double vx = -0.0; volatile float vf = -0.0f;
+          __attribute__((noinline)) void f(double x, double* s, double* c) { *s = std::sin(x); *c = std::cos(x); }
+          __attribute__((noinline)) void g(float x, float* s, float* c) { *s = std::sin(x); *c = std::cos(x); }
+          int main() {
+            double s, c; f(vx, &s, &c); float sf, cf; g(vf, &sf, &cf);
+            std::printf("sin/cos pair: double signbit %d, float signbit %d; lone sin: %d\n",
+                        (int)std::signbit(s), (int)std::signbit(sf), (int)std::signbit(std::sin(double(vx))));
+          }
+          X
+          $CXX -std=c++23 -O2 probe.cpp -o probe && ./probe || true
+          $CXX -std=c++23 -O2 -S probe.cpp -o - | grep -E "call|bl\s|jmp\s+_" || true
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
       - name: Build
