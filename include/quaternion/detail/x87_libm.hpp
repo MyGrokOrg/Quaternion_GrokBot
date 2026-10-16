@@ -9,9 +9,10 @@
 // forwarders there; nothing else changes, and other platforms never see this file.
 //
 // Method: x87 arithmetic (64-bit significand) and double-length ("dd") values, hi + lo.
-//   * sin, cos, tan: exact Payne-Hanek reduction of |x| >= pi/4 with 256 bits of 2/pi taken
-//     from a 16,768-bit table at the exponent of x (integer arithmetic, so every argument up to
-//     LDBL_MAX is reduced to within 2^-190 of a quadrant), then Taylor kernels on |r| <= pi/4.
+//   * sin, cos, tan: Cody-Waite reduction with pi/2 in four parts (232 bits) for
+//     pi/4 < |x| < 2^23 pi/2; above, exact Payne-Hanek reduction with 256 bits of 2/pi taken from
+//     a 16,768-bit table at the exponent of x (integer arithmetic, so every argument up to
+//     LDBL_MAX is reduced to within 2^-190 of a quadrant); then Taylor kernels on |r| <= pi/4.
 //   * exp, expm1, sinh: x = k ln2 + r with ln2 in three parts; Taylor kernel for e^r - 1.
 //   * pow(x, y) = exp(y log x) with log x double-length (atanh series).
 //   * lgamma: Stirling for x >= 20, upward shift below, Taylor series next to the zeros at 1
@@ -27,8 +28,14 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <bit>
 #include <limits>
 #include <type_traits>
+
+static_assert(std::numeric_limits<long double>::digits == 64 && std::numeric_limits<long double>::radix == 2 &&
+                  std::numeric_limits<long double>::max_exponent == 16384 &&
+                  std::numeric_limits<long double>::min_exponent == -16381,
+              "QUATERNION_X87_LIBM: long double must be the x87 80-bit format");
 
 namespace quat::detail::lm {
 namespace x87 {
@@ -81,11 +88,35 @@ struct dd {
 }
 [[nodiscard]] inline ld round(dd a) noexcept { return a.hi + a.lo; }
 // x * 2^k for a normal or subnormal result (one rounding: the hardware multiply).
-[[nodiscard]] inline ld scale(ld x, int k) noexcept {
-    if (k >= -16300) return std::ldexp(x, k);
-    return std::ldexp(x, k + 256) * 0x1p-256L;
+// 2^k for -16382 <= k <= 16383, from the bits (the x87 format: explicit leading significand
+// bit, 15-bit biased exponent); cheaper than ldexp, a library call.
+struct x87_bits {
+    std::uint64_t m;
+    std::uint16_t se, pad[3];
+};
+[[nodiscard]] inline ld pow2(int k) noexcept {
+    return std::bit_cast<ld>(x87_bits{std::uint64_t(1) << 63, static_cast<std::uint16_t>(k + 16383), {0, 0, 0}});
 }
-[[nodiscard]] inline dd scale(dd x, int k) noexcept { return {std::ldexp(x.hi, k), std::ldexp(x.lo, k)}; }
+// biased exponent of a positive normal x (0 for subnormals and zero)
+[[nodiscard]] inline int biased_exponent(ld x) noexcept { return std::bit_cast<x87_bits>(x).se & 0x7fff; }
+// v rounded to an integer (ties to even) for |v| < 2^62: the x87 significand has 64 bits
+[[nodiscard]] inline ld round_int(ld v) noexcept {
+    constexpr ld magic = 0x1.8p63L;
+    volatile ld t = v + magic;  // volatile: no reassociation even with -fassociative-math
+    return t - magic;
+}
+// x 2^k, rounded once (when the result is subnormal, by the last multiplication)
+[[nodiscard]] inline ld scale(ld x, int k) noexcept {
+    if (k > 16383) return x * pow2(16383) * pow2(k - 16383);
+    if (k >= -16382) return x * pow2(k);
+    return x * pow2(k + 256) * pow2(-256);
+}
+// x 2^k for a double-length x whose parts stay normal (the callers' ranges)
+[[nodiscard]] inline dd scale(dd x, int k) noexcept {
+    if (k < -16382 || k > 16383) return {std::ldexp(x.hi, k), std::ldexp(x.lo, k)};
+    const ld f = pow2(k);
+    return {x.hi * f, x.lo * f};
+}
 template <std::size_t N>
 [[nodiscard]] inline ld horner(const ld (&c)[N], ld z) noexcept {
     ld p = c[N - 1];
@@ -96,6 +127,9 @@ template <std::size_t N>
 // ---- constants: the output of tests/gen/gen_x87_constants.py, verbatim -------------
 inline constexpr dd k_pio2{0xc90fdaa22168c235p-63L, -0xece675d1fc8f8cbbp-129L};
 inline constexpr dd k_pi{0xc90fdaa22168c235p-62L, -0xece675d1fc8f8cbbp-128L};
+inline constexpr dd k_inv3{0xaaaaaaaaaaaaaaabp-65L, -0xaaaaaaaaaaaaaaabp-130L};
+inline constexpr dd k_inv5{0xcccccccccccccccdp-66L, -0xcccccccccccccccdp-132L};
+inline constexpr dd k_inv7{0x9249249249249249p-66L, 0x9249249249249249p-132L};
 inline constexpr dd k_logpi{0x928682473d0de85fp-63L, -0xa06a93957bc0b668p-128L};
 inline constexpr dd k_hl2pi{0xeb3f8e4325f5a535p-64L, -0xd686dffd77cdbfb8p-129L};
 inline constexpr dd k_egamma{0x93c467e37db0c7a5p-64L, -0xb90701fbfab4d2a5p-130L};
@@ -105,6 +139,8 @@ inline constexpr dd k_zeta2m1h{0xa51a6625307d3231p-65L, -0xc276eddff4531a15p-132
 inline constexpr ld k_ln2_1 = 0xb17217f7d1cf0000p-64L, k_ln2_2 = 0xf35793c7673007e6p-113L, k_ln2_3 = -0x950bf0cbcd98d675p-180L;
 inline constexpr ld k_inv_ln2 = 0xb8aa3b295c17f0bcp-63L;
 inline constexpr ld k_pio4 = 0xc90fdaa22168c235p-64L;
+inline constexpr ld k_2_over_pi = 0xa2f9836e4e44152ap-64L;
+inline constexpr ld k_pio2_cw[4] = {0xc90fdaa221000000p-63L, 0xd18469898cc51702p-104L, -0x8f8cbb5bf6c7ddd6p-169L, -0xc19c5fefa20ace27p-234L};
 inline constexpr ld k_sin[] = {
     -0xaaaaaaaaaaaaaaabp-66L,
     0x8888888888888889p-70L,
@@ -428,10 +464,12 @@ inline constexpr std::uint64_t k_two_over_pi[262] = {
         r = {0.0L, 0.0L};
         return q & 3;
     }
+    auto word = [&](int i) -> std::uint64_t { return i >= 0 && i < 5 ? p[4 - i] : 0; };  // bits 64i ..
     auto bits64 = [&](int top) -> std::uint64_t {  // bits top-63 .. top of P (zeros below 0)
-        std::uint64_t v = 0;
-        for (int i = top; i > top - 64; --i) v = (v << 1) | (i >= 0 ? bit(i) : 0u);
-        return v;
+        const int low = top - 63;
+        if (low < 0) return word(0) << (-low);  // top < 63
+        const int i = low / 64, sh = low % 64;
+        return sh == 0 ? word(i) : (word(i) >> sh) | (word(i + 1) << (64 - sh));
     };
     const std::uint64_t h = bits64(L), l = bits64(L - 64);
     const dd fr = fast_two_sum(static_cast<ld>(h), std::ldexp(static_cast<ld>(l), -64));
@@ -439,6 +477,19 @@ inline constexpr std::uint64_t k_two_over_pi[262] = {
     if (negative) rr = neg(rr);
     r = rr;
     return q & 3;
+}
+// Cody-Waite for pi/4 < |x| < 2^23 pi/2 (k < 2^23): r = x - k (c1 + c2 + c3 + c4), pi/2 to
+// 232 bits with c1 of 40 bits, so x - k c1 is exact and r has an absolute error below 2^-200
+// (the smallest |r| of a long double in this range is far larger).
+[[nodiscard]] inline int rem_pio2_cw(ld ax, dd& r) noexcept {
+    const ld kf = round_int(ax * k_2_over_pi);
+    const ld t = ax - kf * k_pio2_cw[0];  // exact
+    const dd p2 = two_prod(kf, k_pio2_cw[1]), p3 = two_prod(kf, k_pio2_cw[2]);
+    dd s = two_sum(t, -p2.hi);
+    s = add(s, -p2.lo);
+    s = add(s, neg(p3));
+    r = add(s, -kf * k_pio2_cw[3]);
+    return static_cast<int>(static_cast<long long>(kf) & 3);
 }
 // sin and cos of r = hi + lo, |r| <= pi/4 (+ rounding), double-length results.
 [[nodiscard]] inline dd ksin(dd r) noexcept {
@@ -478,7 +529,7 @@ enum class trig { sin, cos, tan };
     if (ax < 0x1p-32L) return f == trig::cos ? 1.0L : x;  // also +-0, and subnormals
     dd r{ax, 0.0L};
     int q = 0;
-    if (ax > k_pio4) q = rem_pio2(ax, r);
+    if (ax > k_pio4) q = ax < 0x1.92p+23L ? rem_pio2_cw(ax, r) : rem_pio2(ax, r);
     ld res;
     if (f == trig::tan) {
         const dd s = ksin(r), c = kcos(r);
@@ -501,7 +552,7 @@ enum class trig { sin, cos, tan };
 }
 // y = k ln2 + r, |r| <= ln2/2 (+ rounding), for |y.hi| < 2^15 ln2 (about 22713).
 [[nodiscard]] inline int exp_reduce(dd y, dd& r) noexcept {
-    const ld kf = std::nearbyint(y.hi * k_inv_ln2);
+    const ld kf = round_int(y.hi * k_inv_ln2);
     const dd a = add(two_sum(y.hi - kf * k_ln2_1, y.lo), neg(two_prod(kf, k_ln2_2)));
     r = add(a, -kf * k_ln2_3);
     return static_cast<int>(kf);
@@ -524,7 +575,7 @@ enum class trig { sin, cos, tan };
     const int k = exp_reduce({x, 0.0L}, r);
     const dd em = kexpm1(r);
     if (k > 64) return scale(round(add(em, 1.0L)), k);  // the -1 is below the last bit
-    return round(add(scale(em, k), two_sum(std::ldexp(1.0L, k), -1.0L)));  // 2^k em + (2^k - 1)
+    return round(add(scale(em, k), two_sum(pow2(k), -1.0L)));  // 2^k em + (2^k - 1)
 }
 [[nodiscard]] inline ld sinh(ld x) noexcept {
     const ld ax = std::fabs(x);
@@ -549,13 +600,19 @@ enum class trig { sin, cos, tan };
 // log m = 2 atanh(f), f = (m - 1)/(m + 1), |f| <= 0.1716, s = f^2 <= 0.0295.
 [[nodiscard]] inline dd log_dd(ld x) noexcept {
     int e;
-    ld m = std::frexp(x, &e);
+    ld m;
+    if (const int be = biased_exponent(x); be != 0) {  // normal: x = m 2^e, m in [0.5, 1)
+        e = be - 16382;
+        m = scale(x, -e);  // exact
+    } else {
+        m = std::frexp(x, &e);
+    }
     if (m < 0.70710678118654752440L) m *= 2, --e;
     const dd f = div({m - 1.0L, 0.0L}, two_sum(m, 1.0L));
     const dd s = mul(f, f);
     // 1 + s/3 + s^2/5 + s^3/7 double-length, s^4 (1/9 + s/11 + ...) in long double (< 2^-23)
     const dd s2 = mul(s, s), s3 = mul(s2, s);
-    dd P = add(add(div(s, {3.0L, 0.0L}), div(s2, {5.0L, 0.0L})), div(s3, {7.0L, 0.0L}));
+    dd P = add(add(mul(s, k_inv3), mul(s2, k_inv5)), mul(s3, k_inv7));
     P = add(add(P, s2.hi * s2.hi * horner(k_log_tail, s.hi)), 1.0L);
     const dd lm = mul(mul(f, P), 2.0L);
     const ld ef = static_cast<ld>(e);
@@ -612,6 +669,14 @@ enum class trig { sin, cos, tan };
         s = add(s, z * z * k_zeta2m1h.lo + z * z * z * horner(k_lg2, z));
         return s;
     }
+    if (x > 0x1p62L) {  // x (log x - 1) + (1/2 log(2 pi) - 1/2 log x), with x = m 2^e kept unscaled
+        const int e = biased_exponent(x) - 16383;
+        const ld m = scale(x, -e);  // exact, in [1, 2)
+        const dd L = log_dd(x);
+        dd s = mul(add(L, -1.0L), m);
+        if (e < 16000) s = add(s, scale(add(mul(L, -0.5L), k_hl2pi), -e));
+        return {scale(round(s), e), 0.0L};
+    }
     if (x >= 20.0L) return lgamma_stirling(x);
     // lgamma(x) = lgamma(x + n) - log(x (x + 1) ... (x + n - 1)), x + n >= 20
     const int n = static_cast<int>(std::ceil(20.0L - x));
@@ -636,8 +701,7 @@ enum class trig { sin, cos, tan };
     return add(add(k_logpi, neg(ls)), neg(lg));
 }
 [[nodiscard]] inline ld lgamma(ld x) noexcept {
-    if (!std::isfinite(x) || x == 0 || (x < 0 && std::nearbyint(x) == x) || std::fabs(x) > 0x1p62L)
-        return std::lgamma(x);
+    if (!std::isfinite(x) || x == 0 || (x < 0 && std::nearbyint(x) == x)) return std::lgamma(x);  // poles
     if (std::fabs(x) < 0x1p-64L) return -round(log_dd(std::fabs(x)));  // - log|x| - gamma x
     if (x > 0) return round(lgamma_pos(x));
     int sign;
@@ -646,7 +710,7 @@ enum class trig { sin, cos, tan };
 [[nodiscard]] inline ld tgamma(ld x) noexcept {
     if (!std::isfinite(x) || x == 0 || (x < 0 && std::nearbyint(x) == x) || x > 1756.0L || x < -0x1p62L)
         return std::tgamma(x);
-    if (std::fabs(x) < 0x1p-16380L) return std::tgamma(x);  // 1/x, overflowing
+    if (std::fabs(x) < 0x1p-16380L) return 1.0L / x;  // gamma x is below 2^-16380 of it
     if (std::fabs(x) < 0x1p-64L) return round(add(div({1.0L, 0.0L}, {x, 0.0L}), -k_egamma.hi));  // 1/x - gamma
     if (x > 0) {
         if (x == std::nearbyint(x) && x <= 30.0L) {  // (x - 1)!, exact while it fits
@@ -664,6 +728,26 @@ enum class trig { sin, cos, tan };
     int sign;
     const ld g = exp_dd(lgamma_neg(x, sign));
     return sign < 0 ? -g : g;
+}
+// sin x and cos x (x finite) with one reduction, each as lm::sin/lm::cos would give
+inline void sincos(ld x, ld& s, ld& c) noexcept {
+    const ld ax = std::fabs(x);
+    if (ax < 0x1p-32L) {
+        s = x;
+        c = 1.0L;
+        return;
+    }
+    dd r{ax, 0.0L};
+    int q = 0;
+    if (ax > k_pio4) q = ax < 0x1.92p+23L ? rem_pio2_cw(ax, r) : rem_pio2(ax, r);
+    const ld sr = round(ksin(r)), cr = round(kcos(r));
+    switch (q) {
+        case 0: s = sr, c = cr; break;
+        case 1: s = cr, c = -sr; break;
+        case 2: s = -sr, c = -cr; break;
+        default: s = -cr, c = sr; break;
+    }
+    if (x < 0) s = -s;
 }
 }  // namespace x87
 
@@ -701,22 +785,30 @@ namespace x87 {
 }  // namespace x87
 [[nodiscard]] inline cld polar(long double rho, long double theta) noexcept {
     if (!std::isfinite(rho) || !std::isfinite(theta) || std::signbit(rho)) return std::polar(rho, theta);
-    return {rho * lm::cos(theta), rho * lm::sin(theta)};
+    long double s, c;
+    x87::sincos(theta, s, c);
+    return {rho * c, rho * s};
 }
 [[nodiscard]] inline cld exp(const cld& z) noexcept {
     if (!x87::finite(z)) return std::exp(z);
     if (z.imag() == 0) return {std::exp(z.real()), z.imag()};
     const long double e = std::exp(z.real());
-    return {e * lm::cos(z.imag()), e * lm::sin(z.imag())};
+    long double s, c;
+    x87::sincos(z.imag(), s, c);
+    return {e * c, e * s};
 }
 [[nodiscard]] inline cld sinh(const cld& z) noexcept {
     if (!x87::finite(z)) return std::sinh(z);
-    return {lm::sinh(z.real()) * lm::cos(z.imag()), std::cosh(z.real()) * lm::sin(z.imag())};
+    long double s, c;
+    x87::sincos(z.imag(), s, c);
+    return {lm::sinh(z.real()) * c, std::cosh(z.real()) * s};
 }
 [[nodiscard]] inline cld cosh(const cld& z) noexcept {
     if (!x87::finite(z)) return std::cosh(z);
     if (z.real() == 0 && z.imag() == 0) return {1.0L, z.imag()};
-    return {std::cosh(z.real()) * lm::cos(z.imag()), lm::sinh(z.real()) * lm::sin(z.imag())};
+    long double s, c;
+    x87::sincos(z.imag(), s, c);
+    return {std::cosh(z.real()) * c, lm::sinh(z.real()) * s};
 }
 [[nodiscard]] inline cld sin(const cld& z) noexcept {  // -i sinh(i z)
     if (!x87::finite(z)) return std::sin(z);

@@ -1,11 +1,11 @@
 // The library's own x87 long double kernels (QUATERNION_X87_LIBM, quaternion/detail/x87_libm.hpp).
 // Built everywhere; the checks run only where the macro is on (CI forces it on Linux x86_64
-// with -DQUATERNION_X87_LIBM=1, and it is the default on macOS x86_64).
+// with -DQUATERNION_X87_LIBM=1).
 //  * every function against correctly rounded mpmath references (tests/x87_refs.inc, and
 //    tests/x87_crefs.inc for the std::complex<long double> overloads, normwise): the
 //    result must be the reference or a neighbour (error below 1 ulp; the kernels measure about 0.5), and the share that is
 //    exactly the reference is printed;
-//  * special values (+-0, +-inf, NaN) behave as the C library's;
+//  * special values (+-0, +-inf, NaN, overflow, underflow) behave as the C library's;
 //  * where the C library is glibc, a seeded random comparison with it (glibc's x87 long double
 //    functions are accurate to a few ulp; the bounds are 3 ulp, 8 for tgamma and lgamma);
 //  * the overloads in quat::detail::lm are the ones the library calls.
@@ -157,9 +157,16 @@ TEST(special_values) {
     const ld tiny = std::numeric_limits<ld>::denorm_min(), mn = std::numeric_limits<ld>::min();
     const ld xs[] = {0.0L, -0.0L, inf, -inf, nan, tiny, -tiny, mn, -mn, big, -big, 1.0L, -1.0L, 2.0L, -2.0L, 0.5L,
                      -0.5L, 11356.0L, 11357.0L, -11400.0L, 1754.0L, 1755.5L, -1754.5L, -1760.5L, 0x1p-70L, -0x1p-70L};
+    // NaN, infinite and zero results must be the C library's exactly; finite nonzero ones must
+    // be finite and nonzero, and within 2 ulp of glibc's where the C library is glibc (Apple's
+    // are the inaccurate ones being replaced: sinl(LDBL_MAX), tgammal(1755.5), ...)
     auto agree = [](ld a, ld b) {
-        return (std::isnan(a) && std::isnan(b)) || same_bits(a, b) ||
-               (std::isfinite(b) && b != 0 && std::isfinite(a) && ulps(a, b) <= 2.0L);
+        if (std::isnan(b) || std::isinf(b) || b == 0) return (std::isnan(a) && std::isnan(b)) || same_bits(a, b);
+#if defined(__GLIBC__)
+        return std::isfinite(a) && a != 0 && ulps(a, b) <= 2.0L;
+#else
+        return std::isfinite(a) && a != 0;
+#endif
     };
     for (const char* f : {"sin", "cos", "tan", "sinh", "expm1", "tgamma", "lgamma"})
         for (ld x : xs) {
@@ -178,6 +185,21 @@ TEST(special_values) {
     CHECK(lm::pow(-2.0L, 3) == -8.0L && lm::pow(2, 0.5L) == lm::pow(2.0L, 0.5L));
 }
 
+// compile time: the non-template overloads exist with exactly these signatures (the
+// forwarders take const references, so they cannot match these pointer types)
+template <class F>
+constexpr bool has(F) { return true; }
+static_assert(has<long double (*)(long double) noexcept>(&lm::sin));
+static_assert(has<long double (*)(long double) noexcept>(&lm::cos));
+static_assert(has<long double (*)(long double) noexcept>(&lm::tan));
+static_assert(has<long double (*)(long double) noexcept>(&lm::sinh));
+static_assert(has<long double (*)(long double) noexcept>(&lm::expm1));
+static_assert(has<long double (*)(long double, long double) noexcept>(&lm::pow));
+static_assert(has<long double (*)(long double) noexcept>(&lm::tgamma));
+static_assert(has<long double (*)(long double) noexcept>(&lm::lgamma));
+static_assert(has<cld (*)(const cld&) noexcept>(&lm::exp));
+static_assert(has<cld (*)(long double, long double) noexcept>(&lm::polar));
+
 TEST(overloads_are_used) {
     // the non-template long double overloads win over the forwarders, and float/double still
     // go to std::
@@ -189,6 +211,22 @@ TEST(overloads_are_used) {
     const quat::quaternion<ld> q(x, 0, 0, 0);
     CHECK(same_bits(quat::sin(q).w(), lm::sin(x)));
     static_assert(std::is_same_v<decltype(lm::exp(std::complex<ld>(1.0L, 2.0L))), std::complex<ld>>);
+}
+
+TEST(sincos_matches_sin_and_cos) {
+    // the complex functions take sin and cos from one reduction (x87::sincos): same bits as
+    // lm::sin and lm::cos; seed 20261016, 20,000 finite inputs over the whole exponent range
+    std::mt19937_64 g(20261016);
+    int differ = 0;
+    for (int i = 0; i < 20000; ++i) {
+        const int e = static_cast<int>(g() % 16440) - 16380 + (i % 2 ? 16380 - static_cast<int>(g() % 16400) : 0);
+        ld x = std::ldexp(static_cast<ld>(g() | (std::uint64_t(1) << 63)), (e > 16383 ? 16383 : e) - 64);
+        if (g() & 1) x = -x;
+        ld s, c;
+        lm::x87::sincos(x, s, c);
+        differ += !same_bits(s, lm::sin(x)) || !same_bits(c, lm::cos(x));
+    }
+    CHECK(differ == 0);
 }
 
 #if defined(__GLIBC__)

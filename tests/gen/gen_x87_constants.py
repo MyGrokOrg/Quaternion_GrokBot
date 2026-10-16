@@ -28,6 +28,9 @@ def dd(name, v):
 pi = mp.pi
 dd("k_pio2", pi / 2)
 dd("k_pi", pi)
+dd("k_inv3", mp.mpf(1) / 3)
+dd("k_inv5", mp.mpf(1) / 5)
+dd("k_inv7", mp.mpf(1) / 7)
 dd("k_logpi", mp.log(pi))
 dd("k_hl2pi", mp.log(2 * pi) / 2)
 dd("k_egamma", mp.euler)
@@ -40,6 +43,10 @@ L1 = rn(ln2, 48); L2 = rn(ln2 - L1); L3 = rn(ln2 - L1 - L2)
 print("inline constexpr ld k_ln2_1 = %s, k_ln2_2 = %s, k_ln2_3 = %s;" % (lit(L1), lit(L2), lit(L3)))
 print("inline constexpr ld k_inv_ln2 = %s;" % lit(rn(1 / ln2)))
 print("inline constexpr ld k_pio4 = %s;" % lit(rn(pi / 4)))
+print("inline constexpr ld k_2_over_pi = %s;" % lit(rn(2 / pi)))
+# Cody-Waite pi/2 = c1 + c2 + c3 + c4: c1 has 40 significant bits (k c1 exact for k < 2^24)
+c1 = rn(pi / 2, 40); c2 = rn(pi / 2 - c1); c3 = rn(pi / 2 - c1 - c2); c4 = rn(pi / 2 - c1 - c2 - c3)
+print("inline constexpr ld k_pio2_cw[4] = {%s, %s, %s, %s};" % (lit(c1), lit(c2), lit(c3), lit(c4)))
 
 def arr(name, vals):
     print("inline constexpr ld %s[] = {" % name)
