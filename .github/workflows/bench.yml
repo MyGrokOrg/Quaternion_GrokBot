@@ -1,0 +1,113 @@
+name: Benchmarks (macOS, Windows, Linux)
+
+# Indicative timings of bench/bench.cpp on every CI platform. Shared runners are noisy:
+# compare results only within one run, never across runs or against thresholds. Never fails
+# on a timing; results go to the job summary and to artifacts. Manual and weekly, not on push.
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "Only cases whose name contains this (bench --filter); empty = all"
+        default: ""
+      min_time:
+        description: "Seconds per case (bench --min-time)"
+        default: "0.1"
+  schedule:
+    - cron: "17 5 * * 0"   # Sundays 05:17 UTC
+
+env:
+  FILTER: ${{ inputs.filter || '' }}
+  MIN_TIME: ${{ inputs.min_time || '0.1' }}
+
+jobs:
+  unix:
+    name: bench (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux gcc-14, runner: ubuntu-24.04, cxx: g++-14 }
+          - { name: macos arm64 apple-clang, runner: macos-latest }
+          - { name: macos x86_64 apple-clang, runner: macos-15-intel }
+          - { name: macos arm64 gcc, runner: macos-latest, gcc: true }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          uname -m
+          if [ -n "${{ matrix.cxx }}" ]; then echo "CXX=${{ matrix.cxx }}" >> $GITHUB_ENV
+          elif [ "${{ matrix.gcc }}" = true ]; then
+            brew install gcc >/dev/null || true
+            echo "CXX=$(ls $(brew --prefix gcc)/bin/g++-[0-9]* | sort -V | tail -1)" >> $GITHUB_ENV
+          else echo "CXX=$(xcrun -f clang++)" >> $GITHUB_ENV; fi
+      - name: Build
+        run: |
+          $CXX --version | head -1
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DQUATERNION_BUILD_BENCHMARKS=ON -DBUILD_TESTING=OFF
+          cmake --build build -j 4 --target quaternion_bench
+      - name: Run
+        run: |
+          args=(--min-time "$MIN_TIME" --json bench.json)
+          if [ -n "$FILTER" ]; then args+=(--filter "$FILTER"); fi
+          ./build/quaternion_bench "${args[@]}" | tee bench.txt
+          { echo "### ${{ matrix.name }}"; echo '```'; cat bench.txt; echo '```'; } >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ strategy.job-index }}-${{ runner.os }}-${{ runner.arch }}
+          path: bench.*
+
+  windows:
+    name: bench (${{ matrix.name }})
+    runs-on: ${{ matrix.runner || 'windows-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows x64 msvc, arch: x64, toolset: "" }
+          - { name: windows x64 clang-cl, arch: x64, toolset: "-T ClangCL" }
+          - { name: windows arm64 msvc, arch: ARM64, toolset: "", runner: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: |
+          cmake -B build -A ${{ matrix.arch }} ${{ matrix.toolset }} -DQUATERNION_BUILD_BENCHMARKS=ON -DBUILD_TESTING=OFF
+          cmake --build build --config Release -j --target quaternion_bench
+      - name: Run
+        shell: bash
+        run: |
+          args=(--min-time "$MIN_TIME" --json bench.json)
+          if [ -n "$FILTER" ]; then args+=(--filter "$FILTER"); fi
+          ./build/Release/quaternion_bench.exe "${args[@]}" | tee bench.txt
+          { echo "### ${{ matrix.name }}"; echo '```'; cat bench.txt; echo '```'; } >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-w${{ strategy.job-index }}-${{ runner.arch }}
+          path: bench.*
+
+  mingw:
+    name: bench (windows x64 mingw-w64 gcc)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+      - name: Build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DQUATERNION_BUILD_BENCHMARKS=ON -DBUILD_TESTING=OFF
+          cmake --build build --target quaternion_bench
+      - name: Run
+        run: |
+          args=(--min-time "$MIN_TIME" --json bench.json)
+          if [ -n "$FILTER" ]; then args+=(--filter "$FILTER"); fi
+          ./build/quaternion_bench.exe "${args[@]}" | tee bench.txt
+          { echo "### windows x64 mingw-w64 gcc"; echo '```'; cat bench.txt; echo '```'; } >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-mingw
+          path: bench.*
