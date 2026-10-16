@@ -3,8 +3,9 @@
 // std::complex<long double> functions the headers call that libc++ builds on them (exp, sin,
 // cos, sinh, cosh, sqrt and polar).  See the README, "Supported toolchains".
 //
-// Included by quaternion.hpp only when QUATERNION_X87_LIBM is 1 (off by default for now;
-// -DQUATERNION_X87_LIBM=1 forces it on, e.g. on Linux x86_64 for testing).  It adds non-template
+// Included by quaternion.hpp only when QUATERNION_X87_LIBM is 1: the default on macOS x86_64
+// (Apple Clang or LLVM clang); -DQUATERNION_X87_LIBM=1 forces it on elsewhere (CI does so on
+// Linux x86_64 to test it), -DQUATERNION_X87_LIBM=0 turns it off.  It adds non-template
 // overloads for long double to quat::detail::lm, which overload resolution prefers to the
 // forwarders there; nothing else changes, and other platforms never see this file.
 //

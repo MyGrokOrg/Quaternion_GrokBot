@@ -1125,12 +1125,6 @@ template <class T> void accuracy_limits() {
             k = std::abs(nu) >= T(50) ? T(1024) : T(16);  // large order: recurrence over ~nu steps
         }
         else { got = quat::tgamma_upper(static_cast<T>(r.p), q); k = T(32); }
-#if defined(__APPLE__) && defined(__x86_64__)
-        // macOS x86_64: Apple's x87 long double libm (sinl/cosl reduce large arguments with the
-        // fsin/fcos 66-bit pi, up to 1.21e4 ulp at |x| ~ 666; powl 18.6, sinhl 16.5, tgammal
-        // 37.7 ulp) limits these to 5.76e3 eps (riemann_zeta); see the README.
-        if (std::is_same_v<T, long double>) k *= T(512);
-#endif
         const T tol = std::is_same_v<T, float> ? base : k * base;
         const double err = static_cast<double>(abs(got - want) / abs(want)) / static_cast<double>(e);
         if (err > worst) worst = err, worst_fn = r.fn.data();

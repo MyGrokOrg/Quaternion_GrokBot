@@ -1,8 +1,9 @@
 # On demand only (never on push, pull request or schedule): measures the long double C library
-# on macOS x86_64 (Apple's x87 libm) against glibc, and what the library reaches there when only
-# the 8 inaccurate functions are replaced (fuzz/mpfr_libm_shim.cpp).  See the README section
-# *Supported toolchains*.  Figures in the README/CHANGELOG: libm seed 12, 300 samples;
-# fuzz seed 20261015, 250 samples.
+# on macOS x86_64 (Apple's x87 libm) against glibc, the library's own x87 kernels that replace
+# the 8 inaccurate functions there (QUATERNION_X87_LIBM, on by default on macOS x86_64), and,
+# for comparison, correctly rounded MPFR replacements (fuzz/mpfr_libm_shim.cpp); plus
+# before/after benchmarks and compile times.  See the README section *Supported toolchains*.
+# Figures in the README/CHANGELOG: libm seed 12, 300 samples; fuzz seed 20261015, 250 samples.
 name: libm check (on demand)
 on:
   workflow_dispatch:
@@ -51,13 +52,19 @@ jobs:
           SYS=""; [ "$RUNNER_OS" = macOS ] && SYS="-isysroot $(xcrun --show-sdk-path)"
           $CXX $SYS -std=c++23 -O2 fuzz/libm_check_full.cpp -o lcf
           $CXX $SYS -std=c++23 -O2 fuzz/libm_check.cpp -o lc
+          # the same through quat::detail::lm: the library's own kernels where QUATERNION_X87_LIBM
+          # is on (the default on macOS x86_64), the C library's otherwise
+          $CXX $SYS -std=c++23 -O2 -DLIBM_CHECK_LM -Iinclude fuzz/libm_check_full.cpp -o lcf-lm
           ./lcf "${{ github.event.inputs.libm_seed }}" "${{ github.event.inputs.libm_samples }}" > full-${{ matrix.name }}.txt
+          ./lcf-lm "${{ github.event.inputs.libm_seed }}" "${{ github.event.inputs.libm_samples }}" > lm-${{ matrix.name }}.txt
           ./lc > orig-${{ matrix.name }}.txt
-          shasum full-${{ matrix.name }}.txt orig-${{ matrix.name }}.txt
+          shasum full-${{ matrix.name }}.txt orig-${{ matrix.name }}.txt lm-${{ matrix.name }}.txt
       - name: Analyse
         run: |
           python fuzz/libm_check_full.py full-${{ matrix.name }}.txt | tee report-${{ matrix.name }}.md >> $GITHUB_STEP_SUMMARY
           python fuzz/libm_check.py orig-${{ matrix.name }}.txt | tee orig-report-${{ matrix.name }}.txt
+          echo "### through quat::detail::lm ($(sed -n 2p lm-${{ matrix.name }}.txt))" >> $GITHUB_STEP_SUMMARY
+          python fuzz/libm_check_full.py lm-${{ matrix.name }}.txt | tee lm-report-${{ matrix.name }}.md >> $GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -65,7 +72,9 @@ jobs:
           path: |
             full-*.txt
             orig-*.txt
+            lm-*.txt
             report-*.md
+            lm-report-*.md
   fuzz-ld:
     strategy:
       fail-fast: false
@@ -97,15 +106,16 @@ jobs:
           name: fuzz-ld-${{ matrix.name }}
           path: fuzz-ld-*.md
   shim:
-    # What the library gets on macOS x86_64 when only the 8 inaccurate long double functions
-    # are replaced (by correctly rounded MPFR versions linked into the executable).
+    # The library on macOS x86_64 with Apple's long double libm (QUATERNION_X87_LIBM=0), with
+    # only the 8 inaccurate functions replaced by correctly rounded MPFR versions linked into
+    # the executable (=0 plus the shim), and with its own x87 kernels (the default).
     runs-on: macos-15-intel
     timeout-minutes: 90
     name: shim (macos-15-intel, Apple Clang, ${{ matrix.variant }})
     strategy:
       fail-fast: false
       matrix:
-        variant: [apple-libm, mpfr-shim]
+        variant: [apple-libm, mpfr-shim, x87-libm]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -117,13 +127,15 @@ jobs:
           brew install mpfr >/dev/null 2>&1 || true
           B=$(brew --prefix)
           CXX="$(xcrun -f clang++) -isysroot $(xcrun --show-sdk-path)"
-          if [ "${{ matrix.variant }}" = mpfr-shim ]; then SHIM="fuzz/mpfr_libm_shim.cpp -I$B/include -L$B/lib -lmpfr -lgmp"; else SHIM=""; fi
+          case "${{ matrix.variant }}" in
+            apple-libm) SHIM="-DQUATERNION_X87_LIBM=0" ;;
+            mpfr-shim) SHIM="-DQUATERNION_X87_LIBM=0 fuzz/mpfr_libm_shim.cpp -I$B/include -L$B/lib -lmpfr -lgmp" ;;
+            x87-libm) SHIM="" ;;
+          esac
           $CXX -std=c++23 -O2 -Iinclude fuzz/fuzz_eval.cpp $SHIM -o fe
-          # accuracy-limit test at the Linux tolerance: drop the macOS x86_64 x512 widening (CI copy only)
-          sed -i '' 's/if (std::is_same_v<T, long double>) k \*= T(512);/(void)0;/' tests/test_special2.cpp
-          grep -c 'k \*= T(512)' tests/test_special2.cpp || true
+          # accuracy-limit test at the Linux tolerance (no macOS widening since the x87 kernels)
           $CXX -std=c++23 -O2 -Iinclude -Itests tests/test_special2.cpp $SHIM -o ts2
-          nm fe | grep -E ' T _(sinl|cosl|powl|tgammal)$' || echo "no shim symbols (Apple libm)"
+          nm fe | grep -E ' T _(sinl|cosl|powl|tgammal)$' || echo "no shim symbols"
       - name: test_special2 at Linux tolerance (informational)
         run: ./ts2 2>&1 | grep -E 'accuracy limits|eps, tolerance|passed|failed|FAIL' | tee ts2-${{ matrix.variant }}.txt || true
       - name: Fuzz long double (informational)
@@ -137,3 +149,44 @@ jobs:
           path: |
             fuzz-ld-*.md
             ts2-*.txt
+  bench:
+    # Before/after on macOS x86_64, Apple Clang: the benchmark suite's long double cases and the
+    # compile time of a test file, with QUATERNION_X87_LIBM=0 (Apple's libm) and the default (1).
+    # Shared runners: indicative only.
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    name: bench and compile time (macos-15-intel, Apple Clang)
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: |
+          CXX="$(xcrun -f clang++) -isysroot $(xcrun --show-sdk-path)"
+          $CXX -std=c++23 -O2 -DNDEBUG -Iinclude -DQUATERNION_X87_LIBM=0 bench/bench.cpp -o bench-off
+          $CXX -std=c++23 -O2 -DNDEBUG -Iinclude bench/bench.cpp -o bench-on
+      - name: Benchmarks (long double)
+        run: |
+          for v in off on; do ./bench-$v --filter "/long double" --min-time 0.2 --json bench-$v.json | tee bench-$v.txt; done
+          python3 - <<'PY' | tee bench-compare.md >> $GITHUB_STEP_SUMMARY
+          import json
+          off = {c["name"]: c["ns_per_call"] for c in json.load(open("bench-off.json"))["benchmarks"]}
+          on = {c["name"]: c["ns_per_call"] for c in json.load(open("bench-on.json"))["benchmarks"]}
+          print("| case | ns, Apple libm | ns, x87 kernels | ratio |\n|---|---|---|---|")
+          for k in off:
+              print("| %s | %.1f | %.1f | %.2f |" % (k, off[k], on[k], on[k] / off[k]))
+          PY
+      - name: Compile time
+        run: |
+          CXX="$(xcrun -f clang++) -isysroot $(xcrun --show-sdk-path)"
+          for v in 0 1; do for i in 1 2 3; do
+            /usr/bin/time -p $CXX -std=c++23 -O2 -Iinclude -Itests -DQUATERNION_X87_LIBM=$v -c tests/test_special.cpp -o /tmp/ts.o 2>&1 | awk -v v=$v '/^real/ {print "QUATERNION_X87_LIBM=" v ": " $2 " s"}'
+          done; done | tee compile-time.txt
+          sed 's/^/    /' compile-time.txt >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-macos-15-intel
+          path: |
+            bench-*.txt
+            bench-*.json
+            bench-compare.md
+            compile-time.txt

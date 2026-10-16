@@ -26,11 +26,17 @@
 
 // QUATERNION_X87_LIBM: 1 = use the library's own long double sin, cos, tan, sinh, expm1, pow,
 // tgamma and lgamma, and complex<long double> exp, sin, cos, sinh, cosh, sqrt and polar on top
-// of them (quaternion/detail/x87_libm.hpp), instead of the C and C++ libraries'; needs the x87 80-bit long double
-// (x86_64, GCC or Clang).  Off (0) by default for now; -DQUATERNION_X87_LIBM=1 forces it on, which
-// CI does on Linux to test it.  See the README, "Configuration macros".
+// of them (quaternion/detail/x87_libm.hpp), instead of the C and C++ libraries'.  Default: 1 on
+// macOS x86_64 (Apple's x87 long double sinl, cosl, tanl, sinhl, expm1l, powl, tgammal and
+// lgammal are inaccurate), 0 everywhere else, where the header is not included.  Needs the x87
+// 80-bit long double (x86_64, GCC or Clang); CI forces it on in Linux jobs to test it.  See the
+// README, "Configuration macros".
 #ifndef QUATERNION_X87_LIBM
+#if defined(__APPLE__) && defined(__x86_64__) && defined(__LDBL_MANT_DIG__) && __LDBL_MANT_DIG__ == 64
+#define QUATERNION_X87_LIBM 1
+#else
 #define QUATERNION_X87_LIBM 0
+#endif
 #endif
 #if QUATERNION_X87_LIBM
 #include "detail/x87_libm.hpp"

@@ -1,6 +1,6 @@
 // The library's own x87 long double kernels (QUATERNION_X87_LIBM, quaternion/detail/x87_libm.hpp).
-// Built everywhere; the checks run only where the macro is on (CI forces it on Linux x86_64
-// with -DQUATERNION_X87_LIBM=1).
+// Built everywhere; the checks run only where the macro is on (the default on macOS x86_64; CI
+// also forces it on in Linux x86_64 jobs with -DQUATERNION_X87_LIBM=1).
 //  * every function against correctly rounded mpmath references (tests/x87_refs.inc, and
 //    tests/x87_crefs.inc for the std::complex<long double> overloads, normwise): the
 //    result must be the reference or a neighbour (error below 1 ulp; the kernels measure about 0.5), and the share that is
@@ -199,6 +199,9 @@ static_assert(has<long double (*)(long double) noexcept>(&lm::tgamma));
 static_assert(has<long double (*)(long double) noexcept>(&lm::lgamma));
 static_assert(has<cld (*)(const cld&) noexcept>(&lm::exp));
 static_assert(has<cld (*)(long double, long double) noexcept>(&lm::polar));
+#if defined(__APPLE__) && defined(__x86_64__)
+static_assert(QUATERNION_X87_LIBM == 1 || QUATERNION_X87_LIBM == 0);
+#endif
 
 TEST(overloads_are_used) {
     // the non-template long double overloads win over the forwarders, and float/double still
@@ -273,6 +276,10 @@ TEST(random_vs_glibc) {
 #endif
 
 #else
+#if defined(__APPLE__) && defined(__x86_64__) && !defined(QUATERNION_TEST_X87_OFF_OK)
+// the default on macOS x86_64 is on; a build that turns it off must say so
+static_assert(false, "QUATERNION_X87_LIBM is 0 on macOS x86_64: define QUATERNION_TEST_X87_OFF_OK to build the tests anyway");
+#endif
 TEST(skipped) { std::printf("  QUATERNION_X87_LIBM is 0 in this build: nothing to test\n"); }
 #endif
 
