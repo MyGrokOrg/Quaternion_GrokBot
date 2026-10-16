@@ -1,0 +1,138 @@
+# On demand only (never on push, pull request or schedule): measures the long double C library
+# on macOS x86_64 (Apple's x87 libm) against glibc, and what the library reaches there when only
+# the 8 inaccurate functions are replaced (fuzz/mpfr_libm_shim.cpp).  See the README section
+# *Supported toolchains*.  Figures in the README/CHANGELOG: libm seed 12, 300 samples;
+# fuzz seed 20261015, 250 samples.
+name: libm check (on demand)
+on:
+  workflow_dispatch:
+    inputs:
+      libm_seed:
+        description: "libm_check_full seed"
+        required: false
+        default: "12"
+      libm_samples:
+        description: "libm_check_full samples per function and range"
+        required: false
+        default: "300"
+      fuzz_seed:
+        description: "fuzz.py seed (long double)"
+        required: false
+        default: "20261015"
+      fuzz_samples:
+        description: "fuzz.py samples per function"
+        required: false
+        default: "250"
+permissions:
+  contents: read
+jobs:
+  libm:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos-15-intel-apple-clang, runner: macos-15-intel }
+          - { name: ubuntu-24.04-gcc-14, runner: ubuntu-24.04 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    name: libm (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install mpmath==1.3.0
+      - name: Build and run
+        run: |
+          uname -m; (sw_vers 2>/dev/null || ldd --version | head -1)
+          if [ "$RUNNER_OS" = macOS ]; then CXX=$(xcrun -f clang++); else CXX=g++-14; fi
+          $CXX --version | head -1
+          SYS=""; [ "$RUNNER_OS" = macOS ] && SYS="-isysroot $(xcrun --show-sdk-path)"
+          $CXX $SYS -std=c++23 -O2 fuzz/libm_check_full.cpp -o lcf
+          $CXX $SYS -std=c++23 -O2 fuzz/libm_check.cpp -o lc
+          ./lcf "${{ github.event.inputs.libm_seed }}" "${{ github.event.inputs.libm_samples }}" > full-${{ matrix.name }}.txt
+          ./lc > orig-${{ matrix.name }}.txt
+          shasum full-${{ matrix.name }}.txt orig-${{ matrix.name }}.txt
+      - name: Analyse
+        run: |
+          python fuzz/libm_check_full.py full-${{ matrix.name }}.txt | tee report-${{ matrix.name }}.md >> $GITHUB_STEP_SUMMARY
+          python fuzz/libm_check.py orig-${{ matrix.name }}.txt | tee orig-report-${{ matrix.name }}.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: libm-${{ matrix.name }}
+          path: |
+            full-*.txt
+            orig-*.txt
+            report-*.md
+  fuzz-ld:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos-15-intel-apple-clang, runner: macos-15-intel }
+          - { name: ubuntu-24.04-gcc-14, runner: ubuntu-24.04 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    name: fuzz long double (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install mpmath==1.3.0
+      - name: Build evaluator
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then CXX=$(xcrun -f clang++); else CXX=g++-14; fi
+          cmake -B build -DCMAKE_CXX_COMPILER=$CXX -DCMAKE_BUILD_TYPE=Release -DQUATERNION_BUILD_EXAMPLES=OFF
+          cmake --build build -j 4 --target quaternion_fuzz_eval
+      - name: Fuzz (long double, informational)
+        run: |
+          python fuzz/fuzz.py --exe build/quaternion_fuzz_eval --types "long double" --n "${{ github.event.inputs.fuzz_samples }}" --seed "${{ github.event.inputs.fuzz_seed }}" --report fuzz-ld-${{ matrix.name }}.md || true
+          cat fuzz-ld-${{ matrix.name }}.md >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-ld-${{ matrix.name }}
+          path: fuzz-ld-*.md
+  shim:
+    # What the library gets on macOS x86_64 when only the 8 inaccurate long double functions
+    # are replaced (by correctly rounded MPFR versions linked into the executable).
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    name: shim (macos-15-intel, Apple Clang, ${{ matrix.variant }})
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [apple-libm, mpfr-shim]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install mpmath==1.3.0
+      - name: Build
+        run: |
+          brew install mpfr >/dev/null 2>&1 || true
+          B=$(brew --prefix)
+          CXX="$(xcrun -f clang++) -isysroot $(xcrun --show-sdk-path)"
+          if [ "${{ matrix.variant }}" = mpfr-shim ]; then SHIM="fuzz/mpfr_libm_shim.cpp -I$B/include -L$B/lib -lmpfr -lgmp"; else SHIM=""; fi
+          $CXX -std=c++23 -O2 -Iinclude fuzz/fuzz_eval.cpp $SHIM -o fe
+          # accuracy-limit test at the Linux tolerance: drop the macOS x86_64 x512 widening (CI copy only)
+          sed -i '' 's/if (std::is_same_v<T, long double>) k \*= T(512);/(void)0;/' tests/test_special2.cpp
+          grep -c 'k \*= T(512)' tests/test_special2.cpp || true
+          $CXX -std=c++23 -O2 -Iinclude -Itests tests/test_special2.cpp $SHIM -o ts2
+          nm fe | grep -E ' T _(sinl|cosl|powl|tgammal)$' || echo "no shim symbols (Apple libm)"
+      - name: test_special2 at Linux tolerance (informational)
+        run: ./ts2 2>&1 | grep -E 'accuracy limits|eps, tolerance|passed|failed|FAIL' | tee ts2-${{ matrix.variant }}.txt || true
+      - name: Fuzz long double (informational)
+        run: |
+          python fuzz/fuzz.py --exe ./fe --types "long double" --n "${{ github.event.inputs.fuzz_samples }}" --seed "${{ github.event.inputs.fuzz_seed }}" --report fuzz-ld-${{ matrix.variant }}.md || true
+          cat fuzz-ld-${{ matrix.variant }}.md >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shim-${{ matrix.variant }}
+          path: |
+            fuzz-ld-*.md
+            ts2-*.txt
