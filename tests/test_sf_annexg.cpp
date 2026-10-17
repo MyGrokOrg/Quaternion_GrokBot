@@ -134,65 +134,118 @@ void check_fn(const char* name, QF qf, TF tf) {
 
 
 
-// ---- polynomial oracle: recurrence in std::complex<long double> at t = 2^60 on the ray ------
+// ---- polynomial oracle: the recurrence evaluated exactly as a Laurent series in t on the ray
+// z = a + b t (t -> +inf).  Each component's limit is read off its leading power of t, so no
+// cancellation at a huge sample point can flip a sign (the long double width differs: MSVC 53
+// bits, x87 64, and libstdc++ / libc++ round complex products differently).
 using CL = std::complex<long double>;
-template <class T> R<T> oracle(T x, T y, bool realnan, CL (*p)(unsigned, unsigned, CL), unsigned n, unsigned m) {
+struct L {
+    static constexpr int OFF = 24, N = 2 * OFF;  // powers -OFF .. OFF-1
+    CL c[N] = {};
+    L() = default;
+    L(long double v) { c[OFF] = v; }
+    L(CL v) { c[OFF] = v; }
+    CL& at(int k) { return c[k + OFF]; }
+    CL at(int k) const { return c[k + OFF]; }
+};
+L operator+(L a, const L& b) { for (int i = 0; i < L::N; ++i) a.c[i] += b.c[i]; return a; }
+L operator-(L a, const L& b) { for (int i = 0; i < L::N; ++i) a.c[i] -= b.c[i]; return a; }
+L operator*(const L& a, const L& b) {
+    L r;
+    for (int i = 0; i < L::N; ++i)
+        if (a.c[i] != CL(0))
+            for (int j = 0; j < L::N; ++j) {
+                const int k = i + j - L::OFF;
+                if (k >= 0 && k < L::N) r.c[k] += a.c[i] * b.c[j];
+            }
+    return r;
+}
+L operator*(long double s, L a) { for (auto& v : a.c) v *= s; return a; }
+L operator*(L a, long double s) { return s * a; }
+L operator/(L a, long double s) { for (auto& v : a.c) v /= s; return a; }
+L operator-(long double s, const L& a) { return L(s) - a; }
+// sqrt(1 - z^2) on the ray: sigma i z sqrt(1 - z^-2), sigma from the principal value (off the
+// real axis) or +i sqrt(x^2 - 1) (on it, the library convention), sampled at t = 2^16
+L sqrt1mz2(const L& z) {
+    const CL a = z.at(0), b = z.at(1);
+    const CL z0 = a + b * 65536.0L;
+    const CL s0 = z0.imag() == 0 && std::abs(z0.real()) > 1 ? CL(0, std::sqrt(z0.real() * z0.real() - 1)) : std::sqrt(1.0L - z0 * z0);
+    const long double sigma = (s0 / (CL(0, 1) * z0)).real() > 0 ? 1.0L : -1.0L;
+    L inv;  // 1/z = sum_k (-a/b)^k / b t^-(k+1)
+    CL term = 1.0L / b;
+    for (int k = 1; k <= L::OFF; ++k) { inv.at(-k) = term; term *= -a / b; }
+    const L w = inv * inv;
+    L sq(1.0L), wk(1.0L);
+    long double bin = 1;  // (-1)^k binom(1/2, k)
+    for (int k = 1; k <= L::OFF / 2; ++k) { bin *= -(0.5L - (k - 1)) / k; wk = wk * w; sq = sq + bin * wk; }
+    L iz;
+    for (int i = 0; i < L::N; ++i) iz.c[i] = CL(0, sigma) * z.c[i];
+    return iz * sq;
+}
+template <class T> R<T> oracle(T x, T y, bool realnan, L (*p)(unsigned, unsigned, L), unsigned n, unsigned m) {
     if (std::isnan(x) || std::isnan(y)) return (y == 0 && realnan) ? e(nan<T>, y) : NN<T>();
     if (fin(x) && fin(y)) return skip<T>();
     if (neg(y)) return conj(oracle(x, -y, realnan, p, n, m));
-    const long double t = 1152921504606846976.0L;  // 2^60
-    const long double zx = std::isinf(x) ? (x > 0 ? t : -t) : static_cast<long double>(x);
-    const long double zy = std::isinf(y) ? t : static_cast<long double>(y);
-    const CL v = p(n, m, CL(zx, zy));
-    const auto cl = [](long double c, bool& unspec) -> T {
-        if (std::abs(c) > 1e9L) return std::copysign(inf<T>, static_cast<T>(c));
-        if (std::abs(c) < 1e-9L) { unspec = true; return 0; }
-        return static_cast<T>(c);
+    L z;
+    z.at(0) = CL(std::isinf(x) ? 0.0L : static_cast<long double>(x), std::isinf(y) ? 0.0L : static_cast<long double>(y));
+    z.at(1) = CL(std::isinf(x) ? (x > 0 ? 1.0L : -1.0L) : 0.0L, std::isinf(y) ? 1.0L : 0.0L);
+    const L v = p(n, m, z);
+    long double big = 0;
+    for (int k = 0; k < L::OFF; ++k) big = std::max(big, std::abs(v.at(k)));
+    const long double tol = 1e-12L * (1 + big);
+    const auto lim = [&](bool imag, bool& unspec) -> T {
+        for (int k = L::OFF - 1; k >= 0; --k) {
+            const long double c = imag ? v.at(k).imag() : v.at(k).real();
+            if (std::abs(c) <= tol) continue;
+            return k > 0 ? std::copysign(inf<T>, static_cast<T>(c)) : static_cast<T>(c);
+        }
+        unspec = true;
+        return 0;
     };
     bool ur = false, ui = false;
-    const T re = cl(v.real(), ur);
-    T im = cl(v.imag(), ui);
+    const T re = lim(false, ur);
+    T im = lim(true, ui);
     if (y == 0 && realnan) { im = y; ui = false; }  // real polynomial on the real axis
     return e(re, im, (ur ? UR : 0) | (ui ? UI : 0));
 }
-CL p_legendre(unsigned n, unsigned, CL x) {
-    CL p0(1), p1 = x;
+L p_legendre(unsigned n, unsigned, L x) {
+    L p0(1.0L), p1 = x;
     if (n == 0) return p0;
-    for (unsigned k = 1; k < n; ++k) { CL p2 = (2.0L * k + 1) * x * p1 / (k + 1.0L) - (long double)k * p0 / (k + 1.0L); p0 = p1; p1 = p2; }
+    for (unsigned k = 1; k < n; ++k) { L p2 = (2.0L * k + 1) * x * p1 / (k + 1.0L) - (long double)k * p0 / (k + 1.0L); p0 = p1; p1 = p2; }
     return p1;
 }
-CL p_hermite(unsigned n, unsigned, CL x) {
-    CL p0(1), p1 = 2.0L * x;
+L p_hermite(unsigned n, unsigned, L x) {
+    L p0(1.0L), p1 = 2.0L * x;
     if (n == 0) return p0;
-    for (unsigned k = 1; k < n; ++k) { CL p2 = 2.0L * x * p1 - 2.0L * k * p0; p0 = p1; p1 = p2; }
+    for (unsigned k = 1; k < n; ++k) { L p2 = 2.0L * x * p1 - 2.0L * k * p0; p0 = p1; p1 = p2; }
     return p1;
 }
-CL p_laguerre(unsigned n, unsigned m, CL x) {
-    CL p0(1), p1 = 1.0L + (long double)m - x;
+L p_laguerre(unsigned n, unsigned m, L x) {
+    L p0(1.0L), p1 = 1.0L + (long double)m - x;
     if (n == 0) return p0;
-    for (unsigned k = 1; k < n; ++k) { CL p2 = ((2.0L * k + 1 + m - x) * p1 - (k + (long double)m) * p0) / (k + 1.0L); p0 = p1; p1 = p2; }
+    for (unsigned k = 1; k < n; ++k) { L p2 = ((2.0L * k + 1 + m - x) * p1 - (k + (long double)m) * p0) / (k + 1.0L); p0 = p1; p1 = p2; }
     return p1;
 }
-CL p_cheb_t(unsigned n, unsigned, CL x) {
-    CL p0(1), p1 = x;
+L p_cheb_t(unsigned n, unsigned, L x) {
+    L p0(1.0L), p1 = x;
     if (n == 0) return p0;
-    for (unsigned k = 1; k < n; ++k) { CL p2 = 2.0L * x * p1 - p0; p0 = p1; p1 = p2; }
+    for (unsigned k = 1; k < n; ++k) { L p2 = 2.0L * x * p1 - p0; p0 = p1; p1 = p2; }
     return p1;
 }
-CL p_cheb_u(unsigned n, unsigned, CL x) {
-    CL p0(1), p1 = 2.0L * x;
+L p_cheb_u(unsigned n, unsigned, L x) {
+    L p0(1.0L), p1 = 2.0L * x;
     if (n == 0) return p0;
-    for (unsigned k = 1; k < n; ++k) { CL p2 = 2.0L * x * p1 - p0; p0 = p1; p1 = p2; }
+    for (unsigned k = 1; k < n; ++k) { L p2 = 2.0L * x * p1 - p0; p0 = p1; p1 = p2; }
     return p1;
 }
 // P_l^m with s = sqrt(1 - z^2): principal off the axis, +i sqrt(x^2 - 1) on it (library convention)
-CL p_assoc_legendre(unsigned l, unsigned m, CL x) {
-    CL s = x.imag() == 0 && std::abs(x.real()) > 1 ? CL(0, std::sqrt(x.real() * x.real() - 1)) : std::sqrt(1.0L - x * x);
-    CL pmm(1);
-    for (unsigned i = 1; i <= m; ++i) pmm *= s * (2.0L * i - 1);
+L p_assoc_legendre(unsigned l, unsigned m, L x) {
+    const L s = sqrt1mz2(x);
+    L pmm(1.0L);
+    for (unsigned i = 1; i <= m; ++i) pmm = pmm * s * (2.0L * i - 1);
     if (l == m) return pmm;
-    CL pm1 = (2.0L * m + 1) * x * pmm;
-    for (unsigned k = m + 2; k <= l; ++k) { CL p2 = ((2.0L * k - 1) * x * pm1 - (k + m - 1.0L) * pmm) / (long double)(k - m); pmm = pm1; pm1 = p2; }
+    L pm1 = (2.0L * m + 1) * x * pmm;
+    for (unsigned k = m + 2; k <= l; ++k) { L p2 = ((2.0L * k - 1) * x * pm1 - (k + m - 1.0L) * pmm) / (long double)(k - m); pmm = pm1; pm1 = p2; }
     return pm1;
 }
 
@@ -479,16 +532,16 @@ template <class T> void tables() {
             if (k == RM) return isint(b) ? e(T(0), y, UR) : e(nan<T>, y);
             return k == RP ? e(T(0), y, UR) : zz<T>();));
     // ibeta with integer a, b is a polynomial; other parameters are not derived (NaN)
-    const auto ibeta_p = [](unsigned, unsigned, CL z) { return 6.0L * z * z - 8.0L * z * z * z + 3.0L * z * z * z * z; };
+    const auto ibeta_p = [](unsigned, unsigned, L z) -> L { return 6.0L * z * z - 8.0L * z * z * z + 3.0L * z * z * z * z; };
     G("ibeta 2,3", quat::ibeta(T(2), T(3), q), oracle<T>(x, y, false, ibeta_p, 0, 0));
-    G("ibetac 2,3", quat::ibetac(T(2), T(3), q), oracle<T>(x, y, false, [](unsigned, unsigned, CL z) { return 1.0L - (6.0L * z * z - 8.0L * z * z * z + 3.0L * z * z * z * z); }, 0, 0));
+    G("ibetac 2,3", quat::ibetac(T(2), T(3), q), oracle<T>(x, y, false, [](unsigned, unsigned, L z) -> L { return 1.0L - (6.0L * z * z - 8.0L * z * z * z + 3.0L * z * z * z * z); }, 0, 0));
     G("ibeta 0.5,2", quat::ibeta(T(0.5), T(2), q), (std::isnan(x) || std::isnan(y)) ? NN<T>() : (fin(x) && fin(y)) ? skip<T>() : NN<T>());
     // ---- polynomials (oracle), odd ones give signed zeros at +-0
     const auto oddz = [&](T x, T y, long double c1) -> R<T> { return e((std::signbit(x) != (c1 < 0)) ? -T(0) : T(0), y); };
     for (unsigned n : {0u, 1u, 2u, 3u, 4u, 5u}) {
         const std::string ns = " n=" + std::to_string(n);
         const long double sg = ((n / 2) % 2) ? -1.0L : 1.0L;  // sign of the linear coefficient of odd n
-        const auto poly = [&](T x, T y, CL (*p)(unsigned, unsigned, CL), bool odd) {
+        const auto poly = [&](T x, T y, L (*p)(unsigned, unsigned, L), bool odd) {
             if (fin(x) && fin(y) && y == 0 && x == 0 && odd) return oddz(x, y, sg);
             return oracle<T>(x, y, true, p, n, 0);
         };
