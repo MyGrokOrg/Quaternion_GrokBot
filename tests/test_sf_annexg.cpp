@@ -26,7 +26,6 @@ template <class T> R<T> NN() { return e<T>(nan<T>, nan<T>); }
 template <class T> bool fin(T x) { return std::isfinite(x); }
 template <class T> bool neg(T x) { return !std::isnan(x) && std::signbit(x); }
 template <class T> R<T> conj(R<T> r) { r.im = -r.im; return r; }
-template <class T> R<T> negr(R<T> r) { r.re = -r.re; r.im = -r.im; return r; }
 
 
 template <class T> R<T> zz() { return e<T>(0, 0, UR | UI); }
