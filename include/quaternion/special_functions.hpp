@@ -620,6 +620,8 @@ template <class T>
 // double-T), so only primes need a log evaluation.  The sum is accumulated in double-T.
 template <class T>
 [[nodiscard]] inline cplx<T> zeta_em(const cplx<T>& s) noexcept {
+    // N below must fit a long (an infinite s once built a vector of 9e18 entries)
+    if (!(std::abs(s) < T(1e15))) return {nan<T>(), nan<T>()};
     const long N = static_cast<long>(std::ceil(T(0.3) * std::abs(s))) + 30;
     const long cap = std::min<long>(N, 1L << 20);  // sieve/table size (memory bound)
     std::vector<std::int32_t> spf(static_cast<std::size_t>(cap) + 1, 0);
@@ -690,6 +692,7 @@ template <class T>
         if (s.real() < T() && std::fmod(s.real(), T(2)) == T()) return {T(), T()};  // trivial zeros
         if (s.real() == std::numeric_limits<T>::infinity()) return {T(1), T()};
     }
+    if (!std::isfinite(s.real()) || !std::isfinite(s.imag())) return {nan<T>(), nan<T>()};  // the public function has the limits
     if (std::abs(s) < T(0.25)) {
         // Taylor series about 0.  The functional equation would need zeta(1-s) with 1-s
         // rounded, an error of eps/|s| next to the pole (2.6e6 ulp at s = -1e-7 in double).
@@ -2612,15 +2615,24 @@ template <class T>
 // ---- the axis-reduction lift ----------------------------------------------------------
 // F maps std::complex<W> -> std::complex<W>.  If real_on_real is true, the function is
 // known to be real on the real axis, and a purely real argument yields a real result.
-template <class T, class F>
-[[nodiscard]] inline quaternion<T> lift(const quaternion<T>& q, F&& f, bool real_on_real) {
+// f_lower(x) gives f(x - i0), the value below a cut on the real axis; for the functions with
+// conjugate symmetry f(conj z) = conj f(z) it is conj f(x + i0).
+template <class T, class F, class G>
+[[nodiscard]] inline quaternion<T> lift(const quaternion<T>& q, F&& f, bool real_on_real, G&& f_lower) {
     using W = work_t<T>;
     const W v = static_cast<W>(quat::detail::vabs(q));
-    const cplx<W> r = f(cplx<W>(static_cast<W>(q.w()), v));
-    if (v == W()) {
-        if (real_on_real) return {static_cast<T>(r.real()), q.x(), q.y(), q.z()};
-        return {static_cast<T>(r.real()), static_cast<T>(r.imag()), T(), T()};
+    if (v == W() && !real_on_real) {
+        // On the real axis where f is not real (a cut): the sign of the zero i component
+        // chooses the side and the j/k zeros flip when sign(Im f) != sign(i), as in
+        // quat::detail::lift_sv for the elementary functions.
+        const T b = q.x();
+        const cplx<W> r = std::signbit(b) ? f_lower(static_cast<W>(q.w())) : f(cplx<W>(static_cast<W>(q.w()), W()));
+        const T im = static_cast<T>(r.imag());
+        const bool flip = !std::isnan(im) && std::signbit(im) != std::signbit(b);
+        return {static_cast<T>(r.real()), im, flip ? -q.y() : q.y(), flip ? -q.z() : q.z()};
     }
+    const cplx<W> r = f(cplx<W>(static_cast<W>(q.w()), v));
+    if (v == W()) return {static_cast<T>(r.real()), q.x(), q.y(), q.z()};
     const W s = r.imag() / v;
     // zero components give signed zeros (never 0 * inf = NaN at a pole)
     const auto m = [s](T x) {
@@ -2628,8 +2640,633 @@ template <class T, class F>
     };
     return {static_cast<T>(r.real()), m(q.x()), m(q.y()), m(q.z())};
 }
+template <class T, class F>
+[[nodiscard]] inline quaternion<T> lift(const quaternion<T>& q, F&& f, bool real_on_real) {
+    using W = work_t<T>;
+    return lift(q, f, real_on_real, [&f](W x) { return std::conj(f(cplx<W>(x, W()))); });
+}
+
+// ---- special values of the special functions (README, "Special functions") -------------
+// A rule maps the i-axis image (x, y) of a special input to its value: y is the signed i
+// component when the vector part is zero, |v| otherwise.  Rules are called for non-finite
+// inputs without a NaN, and for finite inputs with a zero vector part (special points such
+// as poles and signed zeros; any other point is left to the kernel).
+namespace sv {
+template <class T>
+struct res {
+    bool hit;
+    std::complex<T> v;
+};
+template <class T>
+[[nodiscard]] inline res<T> hit(T re, T im) { return {true, {re, im}}; }
+template <class T>
+[[nodiscard]] inline res<T> miss() { return {false, {}}; }
+template <class T>
+constexpr T inf = std::numeric_limits<T>::infinity();
+template <class T>
+[[nodiscard]] inline res<T> nn() { return hit(nan<T>(), nan<T>()); }
+// limit of a component growing like c * infinity; a zero c is a zero limit (c's zero)
+template <class T>
+[[nodiscard]] inline T ci(T c) { return c == T() ? c : std::copysign(inf<T>, c); }
+template <class T>
+[[nodiscard]] inline res<T> cinf(T c, T s) { return hit(ci(c), ci(s)); }
+// cos and sin of (p pi + e x), p with exact cospi/sinpi at half-integers, e = +-1
+template <class T>
+[[nodiscard]] inline std::complex<T> ph(T p, T e, T x) {
+    const T cp = cospi(p), sp = sinpi(p);
+    if (x == T()) return {cp, sp};
+    const T cx = detail::lm::cos(x), sx = e * detail::lm::sin(x);
+    return {cp * cx - sp * sx, sp * cx + cp * sx};
+}
+template <class T>
+[[nodiscard]] inline res<T> cinf(const std::complex<T>& c) { return cinf(c.real(), c.imag()); }
+// rays of a non-finite (x, y) with y >= +0: the real axis (y = +0), horizontal (y finite),
+// vertical (x finite, y = +inf) and diagonal (both infinite)
+enum kind { RP, RM, HP, HM, VV, DP, DM };
+template <class T>
+[[nodiscard]] inline kind ray(T x, T y) {
+    if (std::isinf(y)) return std::isfinite(x) ? VV : x > T() ? DP : DM;
+    if (y == T()) return x > T() ? RP : RM;
+    return x > T() ? HP : HM;
+}
+// conjugate symmetry: a rule written for y >= +0 extended to y <= -0
+template <class T, class R>
+[[nodiscard]] inline res<T> csym(T x, T y, R&& r) {
+    if (!std::signbit(y)) return r(x, y);
+    res<T> o = r(x, -y);
+    o.v = std::conj(o.v);
+    return o;
+}
+template <class T>
+[[nodiscard]] inline bool is_int(T x) { return std::isfinite(x) && x == std::floor(x); }
+}  // namespace sv
+
+// The lift with special values: finite inputs with a nonzero vector part take the plain lift
+// (bit for bit), everything else goes through the rule; a NaN anywhere gives NaN (the zero
+// vector part kept where f is real on the real axis).
+template <class T, class F, class R, class G>
+[[nodiscard]] inline quaternion<T> lift_s(const quaternion<T>& q, F&& f, bool real, R&& rule, G&& f_lower) {
+    if (!quat::detail::needs_sv(q)) return lift(q, f, real, f_lower);
+    if (quat::detail::is_finite(q)) {
+        const sv::res<T> r = rule(q.w(), q.x());
+        if (!r.hit) return lift(q, f, real, f_lower);
+        return quat::detail::lift_sv(q, [&r](const std::complex<T>&) { return r.v; });
+    }
+    return quat::detail::lift_sv(q, [&](const std::complex<T>& z) -> std::complex<T> {
+        const T a = z.real(), b = z.imag();
+        if (std::isnan(a) || std::isnan(b)) return {nan<T>(), (b == T() && real) ? b : nan<T>()};
+        const sv::res<T> r = rule(a, b);
+        return r.hit ? r.v : std::complex<T>(nan<T>(), nan<T>());
+    });
+}
+template <class T, class F, class R>
+[[nodiscard]] inline quaternion<T> lift_s(const quaternion<T>& q, F&& f, bool real, R&& rule) {
+    using W = work_t<T>;
+    return lift_s(q, f, real, rule, [&f](W x) { return std::conj(f(cplx<W>(x, W()))); });
+}
 
 }  // namespace detail::sf
+
+// ---- special-value rules, one per function (README table) ---------------------------------
+// Each handles y >= +0 (conjugate symmetry gives y <= -0 where it holds).  "Z" in the
+// comments is a zero limit whose sign is not specified (+0 is returned).
+namespace detail::sf::sv {
+#define QSV_FIN if (std::isfinite(x) && std::isfinite(y))
+template <class T>
+[[nodiscard]] inline res<T> r_tgamma(T x, T y) {
+    return csym(x, y, [](T x, T y) -> res<T> {
+        QSV_FIN {
+            if (x == T()) return hit(std::copysign(inf<T>, x), y);
+            if (x < T() && is_int(x)) return hit(nan<T>(), y);
+            return miss<T>();
+        }
+        switch (ray(x, y)) {
+            case RP: return hit(inf<T>, y);
+            case RM: return hit(nan<T>(), y);
+            case HP: case DP: return nn<T>();
+            default: return hit(T(), T());  // |Gamma| -> 0
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_lgamma(T x, T y) {
+    return csym(x, y, [](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        switch (ray(x, y)) {
+            case RP: return hit(inf<T>, y);
+            case RM: return hit(inf<T>, -inf<T>);  // C lgamma(-inf) = +inf; Im -> -inf above the cut
+            case HP: case DP: return hit(inf<T>, inf<T>);
+            case HM: return hit(-inf<T>, -inf<T>);
+            default: return hit(-inf<T>, inf<T>);
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_digamma(T x, T y) {
+    return csym(x, y, [](T x, T y) -> res<T> {
+        const T pi = quat::detail::pi_v<T>;
+        QSV_FIN {
+            if (x == T()) return hit(-std::copysign(inf<T>, x), y);
+            if (x < T() && is_int(x)) return hit(nan<T>(), y);
+            return miss<T>();
+        }
+        switch (ray(x, y)) {
+            case RP: return hit(inf<T>, y);
+            case RM: return hit(nan<T>(), y);
+            case HP: return hit(inf<T>, T());
+            case HM: return hit(inf<T>, nan<T>());
+            case VV: return hit(inf<T>, pi / 2);
+            case DP: return hit(inf<T>, pi / 4);
+            default: return hit(inf<T>, 3 * pi / 4);
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_polygamma(unsigned m, T x, T y) {
+    if (m == 0) return r_digamma(x, y);
+    return csym(x, y, [m](T x, T y) -> res<T> {
+        QSV_FIN {
+            if (x == T()) return hit(m % 2 ? inf<T> : -std::copysign(inf<T>, x), y);
+            if (x < T() && is_int(x)) return hit(m % 2 ? inf<T> : nan<T>(), y);
+            return miss<T>();
+        }
+        switch (ray(x, y)) {
+            case RP: return hit(T(), y);
+            case RM: return hit(nan<T>(), y);
+            case HM: return nn<T>();
+            default: return hit(T(), T());
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_erf(T x, T y) {
+    return csym(x, y, [](T x, T y) -> res<T> {
+        QSV_FIN return x == T() ? hit(x, y) : miss<T>();
+        switch (ray(x, y)) {
+            case RP: return hit(T(1), y);
+            case RM: return hit(T(-1), y);
+            case HP: case DP: return hit(T(1), T());
+            case HM: case DM: return hit(T(-1), T());
+            default: return x == T() ? hit(x, inf<T>) : nn<T>();
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_erfc(T x, T y) {
+    return csym(x, y, [](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        switch (ray(x, y)) {
+            case RP: return hit(T(), y);
+            case RM: return hit(T(2), y);
+            case HP: case DP: return hit(T(), T());
+            case HM: case DM: return hit(T(2), T());
+            default: return x == T() ? hit(T(1), -inf<T>) : nn<T>();
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_zeta(T x, T y) {
+    return csym(x, y, [](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        switch (ray(x, y)) {
+            case RP: return hit(T(1), y);
+            case RM: return hit(nan<T>(), y);
+            case HP: case DP: return hit(T(1), T());
+            default: return nn<T>();
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_hurwitz(T a, T x, T y) {
+    if (!(a > T())) return std::isfinite(x) && std::isfinite(y) ? miss<T>() : nn<T>();
+    return csym(x, y, [a](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        const kind k = ray(x, y);
+        if (k == RM) return hit(nan<T>(), y);
+        if (k != RP && k != HP && k != DP) return nn<T>();
+        if (a == T(1)) return hit(T(1), k == RP ? y : T());
+        if (a > T(1)) return hit(T(), k == RP ? y : T());
+        // a^{-s} dominates: infinite with the phase -y log a
+        if (k == RP) return hit(inf<T>, y);
+        if (k == DP) return nn<T>();
+        const T t = y * std::log(a);
+        return cinf(detail::lm::cos(t), -detail::lm::sin(t));
+    });
+}
+// Bessel functions: x finite and y -> +inf grows like e^y with the phase given
+template <class T>
+[[nodiscard]] inline T izero_sign(int n, T x) {  // sign of x^n for an integer power at a zero x
+    return (std::signbit(x) && (n % 2 != 0)) ? T(-1) : T(1);
+}
+template <class T>
+[[nodiscard]] inline res<T> r_bessel_j(T nu, T x, T y) {
+    return csym(x, y, [nu](T x, T y) -> res<T> {
+        QSV_FIN {
+            if (x == T() && is_int(nu) && nu != T()) {
+                const int n = static_cast<int>(std::abs(nu));  // J_{-n} = (-1)^n J_n
+                const T s = izero_sign(n, x) * ((nu < T() && n % 2) ? T(-1) : T(1));
+                return hit(std::copysign(T(), s), y);
+            }
+            return miss<T>();
+        }
+        switch (ray(x, y)) {
+            case RP: case RM: return hit(T(), y);
+            case HP: case HM: return hit(T(), T());
+            case VV: return cinf(ph(nu / 2, T(-1), x));
+            default: return nn<T>();
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_bessel_y(T nu, T x, T y) {
+    return csym(x, y, [nu](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        switch (ray(x, y)) {
+            case RP: case RM: return hit(T(), y);
+            case HP: case HM: return hit(T(), T());
+            case VV: return cinf(ph((nu + 1) / 2, T(-1), x));
+            default: return nn<T>();
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_bessel_i(T nu, T x, T y) {
+    return csym(x, y, [nu](T x, T y) -> res<T> {
+        QSV_FIN {
+            if (x == T() && is_int(nu) && nu != T()) {  // I_{-n} = I_n
+                const int n = static_cast<int>(std::abs(nu));
+                return hit(std::copysign(T(), izero_sign(n, x)), y);
+            }
+            return miss<T>();
+        }
+        switch (ray(x, y)) {
+            case RP: return hit(inf<T>, y);
+            case RM: {
+                const T c = cospi(nu), s = sinpi(nu);
+                return hit(ci(c), s == T() ? y : ci(s));
+            }
+            case HP: return cinf(detail::lm::cos(y), detail::lm::sin(y));
+            case HM: return cinf(ph(nu, T(-1), y));
+            case VV: return hit(T(), T());
+            default: return nn<T>();
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_bessel_k(T, T x, T y) {
+    return csym(x, y, [](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        switch (ray(x, y)) {
+            case RP: return hit(T(), y);
+            case RM: return hit(T(), -inf<T>);
+            case HM: return cinf(-detail::lm::sin(y), -detail::lm::cos(y));
+            case DM: return nn<T>();
+            default: return hit(T(), T());
+        }
+    });
+}
+// Hankel functions: H1 decays in the closed upper half plane, H2(z) = conj H1(conj z)
+template <class T>
+[[nodiscard]] inline res<T> r_hankel(int kind_, T nu, T x, T y) {
+    QSV_FIN return miss<T>();
+    if (kind_ == 1 || !std::isinf(y)) return hit(T(), T());
+    return std::isfinite(x) ? cinf(ph(nu / 2, T(-1), x)) : nn<T>();
+}
+template <class T>
+[[nodiscard]] inline res<T> r_sph_j(unsigned n, T x, T y) {
+    return csym(x, y, [n](T x, T y) -> res<T> {
+        QSV_FIN {
+            if (x == T() && n > 0) return hit(std::copysign(T(), izero_sign(static_cast<int>(n % 2), x)), y);
+            return miss<T>();
+        }
+        switch (ray(x, y)) {
+            case RP: case RM: return hit(T(), y);
+            case HP: case HM: return hit(T(), T());
+            case VV: return cinf(ph(T(n) / 2, T(-1), x));
+            default: return nn<T>();
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_sph_y(unsigned n, T x, T y) {
+    return csym(x, y, [n](T x, T y) -> res<T> {
+        QSV_FIN {
+            // y_n(x) ~ -(2n-1)!! / x^{n+1}
+            if (x == T()) return hit(std::signbit(x) && n % 2 == 0 ? inf<T> : -inf<T>, y);
+            return miss<T>();
+        }
+        switch (ray(x, y)) {
+            case RP: case RM: return hit(T(), y);
+            case HP: case HM: return hit(T(), T());
+            case VV: return cinf(ph(T(n + 1) / 2, T(-1), x));
+            default: return nn<T>();
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_airy(bool bi, T x, T y) {
+    return csym(x, y, [bi](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        switch (ray(x, y)) {
+            case RP: return hit(bi ? inf<T> : T(), y);
+            case RM: return hit(T(), y);
+            case HP: case DP: return bi ? nn<T>() : hit(T(), T());
+            default: return nn<T>();
+        }
+    });
+}
+// elliptic integrals
+template <class T>
+[[nodiscard]] inline res<T> r_to_zero(T x, T y) {  // functions tending to 0 on every ray
+    QSV_FIN return miss<T>();
+    return hit(T(), y == T() ? y : T());
+}
+template <class T>
+[[nodiscard]] inline res<T> r_comp_ellint_2(T x, T y) {
+    // E(k) = -i k + O(log k / k) for y >= +0
+    return csym(x, y, [](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        return hit(std::isinf(y) ? inf<T> : y, -x);
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_ellint_1(T k, T x, T y) {
+    if (!(std::abs(k) <= T(1))) return std::isfinite(x) && std::isfinite(y) ? miss<T>() : nn<T>();
+    return csym(x, y, [k](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        if (k == T()) return hit(x, y);  // F(phi, 0) = phi
+        using W = work_t<T>;
+        switch (ray(x, y)) {
+            case RP: case RM: return hit(x, y);
+            case HP: case HM: return hit(x, nan<T>());  // Im is periodic in x
+            default: {
+                // F(x + i inf) = 2 K n + i K', n = round(x / pi), K' = K(sqrt(1 - k^2))
+                const T kp = static_cast<T>(comp_ellint_1k(cplx<W>(static_cast<W>(detail::lm::sqrt((T(1) - k) * (T(1) + k))))).real());
+                if (std::isinf(x)) return hit(x, kp);
+                const T n = std::round(x / quat::detail::pi_v<T>);
+                if (n == T()) return hit(T(), kp);
+                const T K = static_cast<T>(comp_ellint_1k(cplx<W>(static_cast<W>(k))).real());
+                return hit(2 * K * n, kp);
+            }
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_ellint_2(T k, T x, T y) {
+    if (!(std::abs(k) <= T(1))) return std::isfinite(x) && std::isfinite(y) ? miss<T>() : nn<T>();
+    return csym(x, y, [k](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        if (k == T()) return hit(x, y);  // E(phi, 0) = phi
+        switch (ray(x, y)) {
+            case RP: case RM: return hit(x, y);
+            case HP: case HM: return hit(x, nan<T>());
+            case VV: {
+                // E ~ (-1)^n (i k / 2) e^{-i (x + i y)}, n = round(x / pi)
+                const T n = std::round(x / quat::detail::pi_v<T>);
+                const T s = std::fmod(n, T(2)) == T() ? T(1) : T(-1);
+                return cinf(s * detail::lm::sin(x), s * detail::lm::cos(x));
+            }
+            default: return nn<T>();
+        }
+    });
+}
+// exponential, sine/cosine and Fresnel integrals
+template <class T>
+[[nodiscard]] inline res<T> r_ei(T x, T y) {
+    return csym(x, y, [](T x, T y) -> res<T> {
+        const T pi = quat::detail::pi_v<T>;
+        QSV_FIN return miss<T>();
+        switch (ray(x, y)) {
+            case RP: return hit(inf<T>, y);
+            case RM: return hit(-T(), y);
+            case HP: return cinf(detail::lm::cos(y), detail::lm::sin(y));
+            case DP: return nn<T>();
+            default: return hit(T(), pi);
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_en(unsigned n, T x, T y) {
+    return csym(x, y, [n](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        switch (ray(x, y)) {
+            case RP: return hit(T(), y);
+            case RM: return n == 0 ? hit(-inf<T>, y) : hit(-inf<T>, n == 1 ? -quat::detail::pi_v<T> : -inf<T>);
+            case HM: return cinf(-detail::lm::cos(y), detail::lm::sin(y));
+            case DM: return nn<T>();
+            default: return hit(T(), T());
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_si(T x, T y) {
+    return csym(x, y, [](T x, T y) -> res<T> {
+        const T h = quat::detail::pi_v<T> / 2;
+        QSV_FIN return x == T() ? hit(x, y) : miss<T>();
+        switch (ray(x, y)) {
+            case RP: return hit(h, y);
+            case RM: return hit(-h, y);
+            case HP: return hit(h, T());
+            case HM: return hit(-h, T());
+            case VV: return cinf(detail::lm::sin(x), detail::lm::cos(x));
+            default: return nn<T>();
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_ci(T x, T y) {
+    return csym(x, y, [](T x, T y) -> res<T> {
+        const T pi = quat::detail::pi_v<T>;
+        QSV_FIN return x == T() ? hit(-inf<T>, std::signbit(x) ? pi : y) : miss<T>();
+        switch (ray(x, y)) {
+            case RP: return hit(T(), y);
+            case HP: return hit(T(), T());
+            case RM: case HM: return hit(T(), pi);
+            case VV: return x == T() ? hit(inf<T>, pi / 2) : cinf(detail::lm::cos(x), -detail::lm::sin(x));
+            default: return nn<T>();
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_fresnel(bool s, T x, T y) {
+    return csym(x, y, [s](T x, T y) -> res<T> {
+        QSV_FIN return x == T() ? hit(x, y) : miss<T>();
+        switch (ray(x, y)) {
+            case RP: return hit(T(0.5), y);
+            case RM: return hit(T(-0.5), y);
+            case VV: return x == T() ? hit(x, s ? T(-0.5) : T(0.5)) : nn<T>();
+            case DP: return s ? hit(-inf<T>, inf<T>) : hit(inf<T>, inf<T>);
+            case DM: return s ? hit(inf<T>, inf<T>) : hit(-inf<T>, inf<T>);
+            default: return nn<T>();
+        }
+    });
+}
+// polylogarithm: Li_s(z) ~ -log(-z)^s / Gamma(s + 1)
+template <class T>
+[[nodiscard]] inline res<T> r_polylog(T s, T x, T y) {
+    return csym(x, y, [s](T x, T y) -> res<T> {
+        const T pi = quat::detail::pi_v<T>;
+        QSV_FIN return x == T() ? hit(x, y) : miss<T>();
+        const kind k = ray(x, y);
+        const bool real = k == RM;
+        if (!(s > T())) return hit(s == T() ? T(-1) : T(), real ? y : T());
+        if (k == RM || k == HM) return hit(-inf<T>, real ? y : T());
+        const T th = (k == RP || k == HP) ? -pi : k == VV ? -pi / 2 : k == DP ? -3 * pi / 4 : -pi / 4;
+        return hit(-inf<T>, s > T(1) ? inf<T> : s == T(1) ? -th : T());
+    });
+}
+// Lambert W_k: W -> +inf + i (arg z + 2 pi k) on every ray
+template <class T>
+[[nodiscard]] inline res<T> r_lambert_w(int kb, T x, T y) {
+    const T pi = quat::detail::pi_v<T>;
+    QSV_FIN return x == T() && kb == 0 ? hit(x, y) : miss<T>();
+    T th;
+    if (std::isinf(x) && std::isinf(y)) th = std::copysign(x > T() ? pi / 4 : 3 * pi / 4, y);
+    else if (std::isinf(y)) th = std::copysign(pi / 2, y);
+    else if (x > T()) th = T();
+    else th = std::copysign(pi, y);
+    const T im = th + 2 * pi * T(kb);
+    return hit(inf<T>, im == T() ? (y == T() ? y : T()) : im);
+}
+// incomplete gamma: Gamma(a, z) ~ z^{a-1} e^{-z}
+template <class T>
+[[nodiscard]] inline res<T> r_gamma_inc(T a, bool upper, bool reg, T x, T y) {
+    if (reg && !(a > T())) return std::isfinite(x) && std::isfinite(y) ? miss<T>() : nn<T>();
+    if (!upper && a <= T() && is_int(a)) return std::isfinite(x) && std::isfinite(y) ? miss<T>() : nn<T>();
+    return csym(x, y, [a, upper, reg](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        // the constant of the lower function: gamma(a, inf) = Gamma(a), P(a, inf) = 1
+        const T g = reg ? T(1) : static_cast<T>(detail::lm::tgamma(a));
+        const T top = upper ? T() : g;
+        const T sg = upper ? T(1) : T(-1);  // gamma = Gamma(a) - Gamma(a, z)
+        switch (ray(x, y)) {
+            case RP: return hit(top, y);
+            case HP: case DP: return hit(top, T());
+            case VV: return a < T(1) ? hit(top, T()) : nn<T>();
+            case DM: return nn<T>();
+            case HM: {
+                const std::complex<T> c = ph(a - 1, T(-1), y);
+                return cinf(sg * c.real(), sg * c.imag());
+            }
+            default: {  // RM, above the cut
+                if (is_int(a) && a > T()) return hit(ci(sg * cospi(a - 1)), y);
+                if (is_int(a)) {  // Gamma(-n, z): (-1)^n / n! (E1(z) - ...), Im -> (-1)^{n+1} pi / n!
+                    const T n = -a, s = std::fmod(n, T(2)) == T() ? T(-1) : T(1);
+                    return hit(s * inf<T>, s * quat::detail::pi_v<T> / static_cast<T>(detail::lm::tgamma(n + 1)));
+                }
+                const T c = cospi(a), s = sinpi(a);
+                const T re = c == T() ? (upper ? (reg ? T(1) : g) : T()) : ci(-sg * c);
+                return hit(re, ci(-sg * s));
+            }
+        }
+    });
+}
+template <class T>
+[[nodiscard]] inline res<T> r_beta(T b, T x, T y) {
+    if (!(b > T())) return std::isfinite(x) && std::isfinite(y) ? miss<T>() : nn<T>();
+    return csym(x, y, [b](T x, T y) -> res<T> {
+        QSV_FIN return miss<T>();
+        const kind k = ray(x, y);
+        if (k == RM) return hit(is_int(b) ? T() : nan<T>(), y);
+        return hit(T(), k == RP ? y : T());
+    });
+}
+
+// Real polynomials sum c_k z^k: the limit along the ray of a non-finite (x, y), y >= +0.
+template <class T>
+[[nodiscard]] inline std::complex<T> poly_ray(const std::vector<long double>& c, T x, T y) {
+    using L = long double;
+    int n = static_cast<int>(c.size()) - 1;
+    while (n > 0 && c[static_cast<std::size_t>(n)] == L(0)) --n;
+    const auto C = [&c](int k) { return c[static_cast<std::size_t>(k)]; };
+    const auto lim = [](int k, L v) { return k == 0 ? static_cast<T>(v) : std::copysign(inf<T>, static_cast<T>(v)); };
+    if (n == 0) return {static_cast<T>(C(0)), y == T() ? y : T()};
+    if (std::isfinite(y)) {  // x = +-inf: Re ~ c_n x^n, Im ~ n c_n x^{n-1} y
+        const L sx = x > T() ? L(1) : L(-1);
+        const L re = C(n) * (n % 2 ? sx : L(1));
+        if (y == T()) return {lim(1, re), y};
+        if (n == 1) return {lim(1, re), static_cast<T>(C(1) * static_cast<L>(y))};
+        return {lim(1, re), lim(1, C(n) * ((n - 1) % 2 ? sx : L(1)) * static_cast<L>(y))};
+    }
+    if (std::isfinite(x)) {  // y = +inf: p(x + i t) = sum a_k (i t)^k, a_k the Taylor coefficients at x
+        std::vector<L> a(c.begin(), c.begin() + n + 1);
+        const L lx = static_cast<L>(x);
+        for (int i = 0; i < n; ++i)
+            for (int j = n - 1; j >= i; --j) a[static_cast<std::size_t>(j)] += lx * a[static_cast<std::size_t>(j + 1)];
+        T re = T(), im = T();
+        for (int k = n; k >= 0; --k)
+            if (k % 2 == 0 && a[static_cast<std::size_t>(k)] != L(0)) { re = lim(k, a[static_cast<std::size_t>(k)] * ((k / 2) % 2 ? L(-1) : L(1))); break; }
+        for (int k = n; k >= 1; --k)
+            if (k % 2 == 1 && a[static_cast<std::size_t>(k)] != L(0)) { im = lim(k, a[static_cast<std::size_t>(k)] * (((k - 1) / 2) % 2 ? L(-1) : L(1))); break; }
+        return {re, im};
+    }
+    // diagonal z = t (sx + i): coefficients c_k (sx + i)^k, exact Gaussian integers
+    const L sx = x > T() ? L(1) : L(-1);
+    std::vector<L> dr(static_cast<std::size_t>(n) + 1), di(static_cast<std::size_t>(n) + 1);
+    dr[0] = 1; di[0] = 0;
+    for (int k = 1; k <= n; ++k) {
+        const L r = dr[static_cast<std::size_t>(k - 1)], m = di[static_cast<std::size_t>(k - 1)];
+        dr[static_cast<std::size_t>(k)] = r * sx - m;
+        di[static_cast<std::size_t>(k)] = r + m * sx;
+    }
+    T re = T(), im = T();
+    for (int k = n; k >= 0; --k)
+        if (C(k) * dr[static_cast<std::size_t>(k)] != L(0)) { re = lim(k, C(k) * dr[static_cast<std::size_t>(k)]); break; }
+    for (int k = n; k >= 1; --k)
+        if (C(k) * di[static_cast<std::size_t>(k)] != L(0)) { im = lim(k, C(k) * di[static_cast<std::size_t>(k)]); break; }
+    return {re, im};
+}
+// monomial coefficients of the orthogonal polynomials, from their three-term recurrences
+// p_{k+1} = (A_k x + B_k) p_k - C_k p_{k-1}
+template <class F>
+[[nodiscard]] inline std::vector<long double> poly_rec(unsigned n, std::vector<long double> p0, std::vector<long double> p1, F&& abc) {
+    using L = long double;
+    if (n == 0) return p0;
+    for (unsigned k = 1; k < n; ++k) {
+        L A, B, Cc;
+        abc(k, A, B, Cc);
+        std::vector<L> p2(p1.size() + 1, L(0));
+        for (std::size_t j = 0; j < p1.size(); ++j) {
+            p2[j + 1] += A * p1[j];
+            p2[j] += B * p1[j];
+        }
+        for (std::size_t j = 0; j < p0.size(); ++j) p2[j] -= Cc * p0[j];
+        p0 = std::move(p1);
+        p1 = std::move(p2);
+    }
+    return p1;
+}
+[[nodiscard]] inline std::vector<long double> poly_deriv(std::vector<long double> c, unsigned m) {
+    for (unsigned i = 0; i < m && !c.empty(); ++i) {
+        for (std::size_t j = 1; j < c.size(); ++j) c[j - 1] = c[j] * static_cast<long double>(j);
+        c.pop_back();
+    }
+    if (c.empty()) c.push_back(0);
+    return c;
+}
+[[nodiscard]] inline std::vector<long double> poly_mul(const std::vector<long double>& a, const std::vector<long double>& b) {
+    std::vector<long double> r(a.size() + b.size() - 1, 0);
+    for (std::size_t i = 0; i < a.size(); ++i)
+        for (std::size_t j = 0; j < b.size(); ++j) r[i + j] += a[i] * b[j];
+    return r;
+}
+// Special values of a polynomial-type function evaluated in quaternion arithmetic: rule(x, y)
+// gives the value for a non-finite (x, y) (y may be a signed zero); NaN as in lift_s.
+template <class T, class R>
+[[nodiscard]] inline quaternion<T> poly_sv(const quaternion<T>& q, bool real, R&& rule) {
+    return quat::detail::lift_sv(q, [&](const std::complex<T>& z) -> std::complex<T> {
+        const T a = z.real(), b = z.imag();
+        if (std::isnan(a) || std::isnan(b)) return {nan<T>(), (b == T() && real) ? b : nan<T>()};
+        return rule(a, b);
+    });
+}
+template <class T>
+[[nodiscard]] inline std::complex<T> poly_ray_sym(const std::vector<long double>& c, T x, T y) {
+    if (!std::signbit(y)) return poly_ray(c, x, y);
+    return std::conj(poly_ray(c, x, -y));
+}
+#undef QSV_FIN
+}  // namespace detail::sf::sv
 
 #define QUAT_SF_LIFT(NAME, EXPR, REAL)                                                   \
     template <class T>                                                                   \
@@ -2739,23 +3376,29 @@ QUAT_SF_LIFT(expm1, detail::sf::expm1(z), true)
 QUAT_SF_LIFT(log1p, detail::sf::log1p(z), false)
 QUAT_SF_LIFT(cbrt, detail::sf::cbrt(z), false)
 
-// Gamma family.
-QUAT_SF_LIFT(tgamma, detail::sf::tgamma(z), true)
-QUAT_SF_LIFT(lgamma, detail::sf::lgamma(z), false)
-QUAT_SF_LIFT(digamma, detail::sf::digamma(z), true)
-
-// Error functions.
-QUAT_SF_LIFT(erf, detail::sf::erf(z), true)
-QUAT_SF_LIFT(erfc, detail::sf::erfc(z), true)
-
-// Riemann zeta function.
-QUAT_SF_LIFT(riemann_zeta, detail::sf::riemann_zeta(z), true)
 #undef QUAT_SF_LIFT
+
+// Gamma family, error functions, Riemann zeta (special values: detail::sf::sv rules).
+#define QUAT_SF_LIFT_S(NAME, EXPR, REAL, RULE)                                           \
+    template <class T>                                                                   \
+    [[nodiscard]] inline quaternion<T> NAME(const quaternion<T>& q) noexcept {           \
+        return detail::sf::lift_s(                                                       \
+            q, [](const auto& z) { return EXPR; }, REAL,                                 \
+            [](T x, T y) { return detail::sf::sv::RULE(x, y); });                        \
+    }
+QUAT_SF_LIFT_S(tgamma, detail::sf::tgamma(z), true, r_tgamma)
+QUAT_SF_LIFT_S(lgamma, detail::sf::lgamma(z), false, r_lgamma)
+QUAT_SF_LIFT_S(digamma, detail::sf::digamma(z), true, r_digamma)
+QUAT_SF_LIFT_S(erf, detail::sf::erf(z), true, r_erf)
+QUAT_SF_LIFT_S(erfc, detail::sf::erfc(z), true, r_erfc)
+QUAT_SF_LIFT_S(riemann_zeta, detail::sf::riemann_zeta(z), true, r_zeta)
+#undef QUAT_SF_LIFT_S
 
 /// Cylinder Bessel function of the first kind J_n(q) for integer order n (entire in q).
 template <class T>
 [[nodiscard]] inline quaternion<T> cyl_bessel_j(int n, const quaternion<T>& q) noexcept {
-    return detail::sf::lift(q, [n](const auto& z) { return detail::sf::cyl_bessel_j(n, z); }, true);
+    return detail::sf::lift_s(q, [n](const auto& z) { return detail::sf::cyl_bessel_j(n, z); }, true,
+                              [n](T x, T y) { return detail::sf::sv::r_bessel_j(T(n), x, y); });
 }
 
 /// Euler beta function B(q, b) = Gamma(q) Gamma(b) / Gamma(q + b) for real b.
@@ -2764,7 +3407,7 @@ template <class T>
 [[nodiscard]] inline quaternion<T> beta(const quaternion<T>& q, const T& b) noexcept {
     using W = detail::sf::work_t<T>;
     const W wb = static_cast<W>(b);
-    return detail::sf::lift(
+    return detail::sf::lift_s(
         q,
         [wb](const std::complex<W>& z) {
             using namespace detail::sf;
@@ -2773,7 +3416,7 @@ template <class T>
                 return cplx<W>(nan<W>(), W());
             return detail::lm::exp(lgamma(z) + lgamma(cb) - lgamma(z + cb));
         },
-        true);
+        true, [b](T x, T y) { return detail::sf::sv::r_beta(b, x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> beta(const T& a, const quaternion<T>& q) noexcept {
@@ -2796,6 +3439,20 @@ template <class T, class F, class P>
     if (q.x() == T() && q.y() == T() && q.z() == T()) return lift(q, f, static_cast<bool>(real_at(static_cast<W>(q.w()))));
     return lift(q, f, false);
 }
+template <class T, class F, class P, class R, class G>
+    requires std::is_invocable_r_v<bool, P&, work_t<T>>
+[[nodiscard]] inline quaternion<T> lift_s(const quaternion<T>& q, F&& f, P&& real_at, R&& rule, G&& f_lower) {
+    using W = work_t<T>;
+    const bool real = q.x() == T() && q.y() == T() && q.z() == T() && real_at(static_cast<W>(q.w()));
+    return lift_s(q, f, real, rule, f_lower);
+}
+template <class T, class F, class P, class R>
+    requires std::is_invocable_r_v<bool, P&, work_t<T>>
+[[nodiscard]] inline quaternion<T> lift_s(const quaternion<T>& q, F&& f, P&& real_at, R&& rule) {
+    using W = work_t<T>;
+    const bool real = q.x() == T() && q.y() == T() && q.z() == T() && real_at(static_cast<W>(q.w()));
+    return lift_s(q, f, real, rule);
+}
 template <class N, class T>
 [[nodiscard]] inline work_t<T> par(N v) noexcept { return static_cast<work_t<T>>(v); }
 }  // namespace detail::sf
@@ -2809,16 +3466,18 @@ template <class T, std::floating_point N>
 [[nodiscard]] inline quaternion<T> cyl_bessel_j(N nu, const quaternion<T>& q) {
     QUAT_SF_W;
     const W m = static_cast<W>(nu);
-    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_j_nu(m, z); },
-                            [m](W x) { return x >= W() || detail::sf::is_integer(m); });
+    return detail::sf::lift_s(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_j_nu(m, z); },
+                            [m](W x) { return x >= W() || detail::sf::is_integer(m); },
+                              [nu](T x, T y) { return detail::sf::sv::r_bessel_j(static_cast<T>(nu), x, y); });
 }
 /// Y_nu(q) (Bessel function of the second kind / Neumann function).
 template <class T, std::floating_point N>
 [[nodiscard]] inline quaternion<T> cyl_neumann(N nu, const quaternion<T>& q) {
     QUAT_SF_W;
     const W m = static_cast<W>(nu);
-    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_y_nu(m, z); },
-                            [](W x) { return x > W(); });
+    return detail::sf::lift_s(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_y_nu(m, z); },
+                            [](W x) { return x > W(); },
+                              [nu](T x, T y) { return detail::sf::sv::r_bessel_y(static_cast<T>(nu), x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> cyl_neumann(int n, const quaternion<T>& q) {
@@ -2829,8 +3488,9 @@ template <class T, std::floating_point N>
 [[nodiscard]] inline quaternion<T> cyl_bessel_i(N nu, const quaternion<T>& q) {
     QUAT_SF_W;
     const W m = static_cast<W>(nu);
-    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_i_nu(m, z); },
-                            [m](W x) { return x >= W() || detail::sf::is_integer(m); });
+    return detail::sf::lift_s(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_i_nu(m, z); },
+                            [m](W x) { return x >= W() || detail::sf::is_integer(m); },
+                              [nu](T x, T y) { return detail::sf::sv::r_bessel_i(static_cast<T>(nu), x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> cyl_bessel_i(int n, const quaternion<T>& q) {
@@ -2841,8 +3501,9 @@ template <class T, std::floating_point N>
 [[nodiscard]] inline quaternion<T> cyl_bessel_k(N nu, const quaternion<T>& q) {
     QUAT_SF_W;
     const W m = static_cast<W>(nu);
-    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_k_nu(m, z); },
-                            [](W x) { return x > W(); });
+    return detail::sf::lift_s(q, [m](const QUAT_SF_C& z) { return detail::sf::bessel_k_nu(m, z); },
+                            [](W x) { return x > W(); },
+                              [nu](T x, T y) { return detail::sf::sv::r_bessel_k(static_cast<T>(nu), x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> cyl_bessel_k(int n, const quaternion<T>& q) {
@@ -2853,7 +3514,10 @@ template <class T, std::floating_point N>
 [[nodiscard]] inline quaternion<T> cyl_hankel_1(N nu, const quaternion<T>& q) {
     QUAT_SF_W;
     const W m = static_cast<W>(nu);
-    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::hankel_1(m, z); }, false);
+    return detail::sf::lift_s(
+        q, [m](const QUAT_SF_C& z) { return detail::sf::hankel_1(m, z); }, false,
+        [nu](T x, T y) { return detail::sf::sv::r_hankel(1, static_cast<T>(nu), x, y); },
+        [m](W x) { return std::conj(detail::sf::hankel_2(m, QUAT_SF_C(x, W()))); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> cyl_hankel_1(int n, const quaternion<T>& q) {
@@ -2863,7 +3527,10 @@ template <class T, std::floating_point N>
 [[nodiscard]] inline quaternion<T> cyl_hankel_2(N nu, const quaternion<T>& q) {
     QUAT_SF_W;
     const W m = static_cast<W>(nu);
-    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::hankel_2(m, z); }, false);
+    return detail::sf::lift_s(
+        q, [m](const QUAT_SF_C& z) { return detail::sf::hankel_2(m, z); }, false,
+        [nu](T x, T y) { return detail::sf::sv::r_hankel(2, static_cast<T>(nu), x, y); },
+        [m](W x) { return std::conj(detail::sf::hankel_1(m, QUAT_SF_C(x, W()))); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> cyl_hankel_2(int n, const quaternion<T>& q) {
@@ -2873,33 +3540,43 @@ template <class T>
 template <class T>
 [[nodiscard]] inline quaternion<T> sph_bessel(unsigned n, const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [n](const QUAT_SF_C& z) { return detail::sf::sph_bessel_j(n, z); }, true);
+    return detail::sf::lift_s(q, [n](const QUAT_SF_C& z) { return detail::sf::sph_bessel_j(n, z); }, true,
+                              [n](T x, T y) { return detail::sf::sv::r_sph_j(n, x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> sph_neumann(unsigned n, const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [n](const QUAT_SF_C& z) { return detail::sf::sph_bessel_y(n, z); }, true);
+    return detail::sf::lift_s(q, [n](const QUAT_SF_C& z) { return detail::sf::sph_bessel_y(n, z); }, true,
+                              [n](T x, T y) { return detail::sf::sv::r_sph_y(n, x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> sph_hankel_1(unsigned n, const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [n](const QUAT_SF_C& z) { return detail::sf::sph_hankel(n, z, 1); }, false);
+    return detail::sf::lift_s(
+        q, [n](const QUAT_SF_C& z) { return detail::sf::sph_hankel(n, z, 1); }, false,
+        [n](T x, T y) { return detail::sf::sv::r_hankel(1, static_cast<T>(n), x, y); },
+        [n](W x) { return std::conj(detail::sf::sph_hankel(n, QUAT_SF_C(x, W()), 2)); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> sph_hankel_2(unsigned n, const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [n](const QUAT_SF_C& z) { return detail::sf::sph_hankel(n, z, 2); }, false);
+    return detail::sf::lift_s(
+        q, [n](const QUAT_SF_C& z) { return detail::sf::sph_hankel(n, z, 2); }, false,
+        [n](T x, T y) { return detail::sf::sv::r_hankel(2, static_cast<T>(n), x, y); },
+        [n](W x) { return std::conj(detail::sf::sph_hankel(n, QUAT_SF_C(x, W()), 1)); });
 }
 /// Airy functions Ai(q), Bi(q) (entire).
 template <class T>
 [[nodiscard]] inline quaternion<T> airy_ai(const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::airy(z, false); }, true);
+    return detail::sf::lift_s(q, [](const QUAT_SF_C& z) { return detail::sf::airy(z, false); }, true,
+                              [](T x, T y) { return detail::sf::sv::r_airy(false, x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> airy_bi(const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::airy(z, true); }, true);
+    return detail::sf::lift_s(q, [](const QUAT_SF_C& z) { return detail::sf::airy(z, true); }, true,
+                              [](T x, T y) { return detail::sf::sv::r_airy(true, x, y); });
 }
 
 // ---- orthogonal polynomials (evaluated directly in quaternion arithmetic) -----------------
@@ -2918,10 +3595,85 @@ template <class T, class W>
 }
 }  // namespace detail::sf
 
+namespace detail::sf::sv {
+using pc = std::vector<long double>;
+[[nodiscard]] inline pc c_legendre(unsigned l) {
+    return poly_rec(l, {1}, {0, 1}, [](unsigned k, long double& A, long double& B, long double& C) {
+        A = (2.0L * k + 1) / (k + 1); B = 0; C = static_cast<long double>(k) / (k + 1);
+    });
+}
+[[nodiscard]] inline pc c_hermite(unsigned n) {
+    return poly_rec(n, {1}, {0, 2}, [](unsigned k, long double& A, long double& B, long double& C) {
+        A = 2; B = 0; C = 2.0L * k;
+    });
+}
+[[nodiscard]] inline pc c_laguerre(unsigned n, unsigned m) {
+    const long double a = m;
+    return poly_rec(n, {1}, {1 + a, -1}, [a](unsigned k, long double& A, long double& B, long double& C) {
+        A = -1.0L / (k + 1); B = (2.0L * k + 1 + a) / (k + 1); C = (k + a) / (k + 1);
+    });
+}
+[[nodiscard]] inline pc c_chebyshev(unsigned n, bool second) {
+    return poly_rec(n, {1}, second ? pc{0, 2} : pc{0, 1}, [](unsigned, long double& A, long double& B, long double& C) {
+        A = 2; B = 0; C = 1;
+    });
+}
+[[nodiscard]] inline pc c_one_minus_x2(unsigned p) {  // (1 - x^2)^p
+    pc r{1};
+    for (unsigned i = 0; i < p; ++i) r = poly_mul(r, pc{1, 0, -1});
+    return r;
+}
+// I_z(a, b) for positive integers a, b: sum_{j=a}^{n} C(n, j) z^j (1 - z)^{n-j}, n = a + b - 1
+[[nodiscard]] inline pc c_ibeta(unsigned a, unsigned b) {
+    const unsigned n = a + b - 1;
+    pc r(n + 1, 0);
+    long double binom = 1;  // C(n, j)
+    for (unsigned j = 0; j <= n; ++j) {
+        if (j >= a) {
+            pc t{binom};
+            for (unsigned i = 0; i < j; ++i) t = poly_mul(t, pc{0, 1});
+            for (unsigned i = 0; i < n - j; ++i) t = poly_mul(t, pc{1, -1});
+            for (std::size_t i = 0; i < t.size(); ++i) r[i] += t[i];
+        }
+        binom = binom * (n - j) / (j + 1);
+    }
+    return r;
+}
+template <class T>
+[[nodiscard]] inline res<T> r_ibeta(T a, T b, bool comp, T x, T y) {
+    if (std::isfinite(x) && std::isfinite(y)) return miss<T>();
+    if (!(a > T() && b > T() && is_int(a) && is_int(b) && a + b <= T(200))) return nn<T>();
+    pc c = c_ibeta(static_cast<unsigned>(a), static_cast<unsigned>(b));
+    if (comp) {
+        for (auto& v : c) v = -v;
+        c[0] += 1;
+    }
+    const std::complex<T> v = poly_ray_sym(c, x, y);
+    return hit(v.real(), v.imag());
+}
+// zero of an odd polynomial at x = +-0: the sign of x times the sign of the linear coefficient
+template <class T>
+[[nodiscard]] inline quaternion<T> odd_zero(const quaternion<T>& q, long double c1) {
+    const bool neg = std::signbit(q.w()) != (c1 < 0);
+    return {neg ? -T() : T(), q.x(), q.y(), q.z()};
+}
+}  // namespace detail::sf::sv
+
+// Polynomials: non-finite arguments take the limit along the ray (README), and an odd
+// polynomial gives a signed zero at +-0.
+#define QUAT_SF_POLY_SV(COEFFS, ODD)                                                          \
+    if (quat::detail::needs_sv(q)) {                                                          \
+        if (!quat::detail::is_finite(q))                                                      \
+            return detail::sf::sv::poly_sv(q, true, [&](T x_, T y_) {                         \
+                return detail::sf::sv::poly_ray_sym<T>(COEFFS, x_, y_);                       \
+            });                                                                               \
+        if (q.w() == T() && (ODD)) return detail::sf::sv::odd_zero(q, (COEFFS)[1]);           \
+    }
 /// Legendre polynomial P_l(q).
 template <class T>
 [[nodiscard]] inline quaternion<T> legendre(unsigned l, const quaternion<T>& q) {
     QUAT_SF_W;
+    QUAT_SF_POLY_SV(detail::sf::sv::c_legendre(l), l % 2 == 1)
     const auto x = detail::sf::to_w(q);
     quaternion<W> p0(W(1)), p1 = x;
     if (l == 0) return detail::sf::from_w<T>(p0);
@@ -2939,6 +3691,35 @@ template <class T>
 [[nodiscard]] inline quaternion<T> assoc_legendre(unsigned l, unsigned m, const quaternion<T>& q) {
     QUAT_SF_W;
     if (m > l) return quaternion<T>();
+    if (quat::detail::needs_sv(q)) {
+        using detail::sf::sv::pc;
+        const pc d = detail::sf::sv::poly_deriv(detail::sf::sv::c_legendre(l), m);
+        if (!quat::detail::is_finite(q)) {
+            if (m % 2 == 0) {
+                const pc c = detail::sf::sv::poly_mul(detail::sf::sv::c_one_minus_x2(m / 2), d);
+                return detail::sf::sv::poly_sv(q, true, [&](T x_, T y_) { return detail::sf::sv::poly_ray_sym<T>(c, x_, y_); });
+            }
+            // odd m: P = s R(z), s = sqrt(1 - z^2) ~ -i z sqrt(1 - z^-2) for Im z > 0; the
+            // limit is that of the polynomial part of z sqrt(1 - z^-2) R(z)
+            const pc r = detail::sf::sv::poly_mul(detail::sf::sv::c_one_minus_x2((m - 1) / 2), d);
+            pc t(r.size() + 1, 0);
+            for (std::size_t p = 0; p < t.size(); ++p) {
+                long double b = 1;  // coefficients of sqrt(1 - w)
+                for (std::size_t j = 0; p + 2 * j <= r.size(); ++j) {
+                    if (p + 2 * j >= 1) t[p] += b * r[p + 2 * j - 1];
+                    b *= (static_cast<long double>(j) - 0.5L) / static_cast<long double>(j + 1);
+                }
+            }
+            return detail::sf::sv::poly_sv(q, false, [&](T x_, T y_) -> std::complex<T> {
+                // on the real axis (|x| > 1) s = +i sqrt(x^2 - 1), as for finite x
+                if (y_ == T()) return {T(), (x_ < T() ? T(-1) : T(1)) * detail::sf::sv::poly_ray<T>(t, x_, T()).real()};
+                const std::complex<T> v = detail::sf::sv::poly_ray<T>(t, x_, std::abs(y_));
+                const std::complex<T> o(v.imag(), -v.real());
+                return std::signbit(y_) ? std::conj(o) : o;
+            });
+        }
+        if (q.w() == T() && (l - m) % 2 == 1) return detail::sf::sv::odd_zero(q, d[1]);
+    }
     const auto x = detail::sf::to_w(q);
     const quaternion<W> s = sqrt(W(1) - x * x);
     // P_m^m = (2m-1)!! s^m
@@ -2959,6 +3740,24 @@ template <class T>
 [[nodiscard]] inline quaternion<T> sph_legendre(unsigned l, unsigned m, const quaternion<T>& theta) {
     QUAT_SF_W;
     if (m > l) return quaternion<T>();
+    if (quat::detail::needs_sv(theta)) {
+        if (!quat::detail::is_finite(theta)) {
+            const T c00 = T(0.5) / detail::lm::sqrt(quat::detail::pi_v<T>);
+            return detail::sf::sv::poly_sv(theta, true, [&](T x_, T y_) -> std::complex<T> {
+                if (l == 0) return {c00, y_ == T() ? y_ : T()};
+                if (!std::isinf(y_)) return {detail::sf::nan<T>(), y_ == T() ? y_ : detail::sf::nan<T>()};
+                if (std::isinf(x_)) return {detail::sf::nan<T>(), detail::sf::nan<T>()};
+                // Y ~ N (-1)^m (i e^{-i theta} / 2)^m (e^{-i theta} / 2)^{l-m} P_l^{(m)} leading term
+                const std::complex<T> c = detail::sf::sv::ph(T(m) / 2, T(-1), T(l) * x_);
+                const T sg = m % 2 ? T(-1) : T(1);
+                return {detail::sf::sv::ci(sg * c.real()), detail::sf::sv::ci(sg * c.imag())};
+            });
+        }
+        if (theta.w() == T() && m > 0) {
+            const bool neg = (m % 2 == 1) && !std::signbit(theta.w());
+            return {neg ? -T() : T(), theta.x(), theta.y(), theta.z()};
+        }
+    }
     const auto t = detail::sf::to_w(theta);
     const quaternion<W> x = cos(t), s = sin(t);
     // normalized recurrence: Ybar_l^m = N_l^m P_l^m with N = sqrt((2l+1)/(4pi) (l-m)!/(l+m)!)
@@ -2984,6 +3783,7 @@ template <class T>
 template <class T>
 [[nodiscard]] inline quaternion<T> hermite(unsigned n, const quaternion<T>& q) {
     QUAT_SF_W;
+    QUAT_SF_POLY_SV(detail::sf::sv::c_hermite(n), n % 2 == 1)
     const auto x = detail::sf::to_w(q);
     quaternion<W> h0(W(1)), h1 = W(2) * x;
     if (n == 0) return detail::sf::from_w<T>(h0);
@@ -2998,6 +3798,7 @@ template <class T>
 template <class T>
 [[nodiscard]] inline quaternion<T> assoc_laguerre(unsigned n, unsigned m, const quaternion<T>& q) {
     QUAT_SF_W;
+    QUAT_SF_POLY_SV(detail::sf::sv::c_laguerre(n, m), false)
     const auto x = detail::sf::to_w(q);
     const W a = W(m);
     quaternion<W> l0(W(1)), l1 = W(1) + a - x;
@@ -3017,6 +3818,7 @@ template <class T>
 template <class T>
 [[nodiscard]] inline quaternion<T> chebyshev_t(unsigned n, const quaternion<T>& q) {
     QUAT_SF_W;
+    QUAT_SF_POLY_SV(detail::sf::sv::c_chebyshev(n, false), n % 2 == 1)
     const auto x = detail::sf::to_w(q);
     quaternion<W> t0(W(1)), t1 = x;
     if (n == 0) return detail::sf::from_w<T>(t0);
@@ -3030,6 +3832,7 @@ template <class T>
 template <class T>
 [[nodiscard]] inline quaternion<T> chebyshev_u(unsigned n, const quaternion<T>& q) {
     QUAT_SF_W;
+    QUAT_SF_POLY_SV(detail::sf::sv::c_chebyshev(n, true), n % 2 == 1)
     const auto x = detail::sf::to_w(q);
     quaternion<W> u0(W(1)), u1 = W(2) * x;
     if (n == 0) return detail::sf::from_w<T>(u0);
@@ -3046,39 +3849,44 @@ template <class T>
 template <class T>
 [[nodiscard]] inline quaternion<T> comp_ellint_1(const quaternion<T>& k) {
     QUAT_SF_W;
-    return detail::sf::lift(k, [](const QUAT_SF_C& z) { return detail::sf::comp_ellint_1k(z); },
-                            [](W x) { return std::abs(x) <= W(1); });
+    return detail::sf::lift_s(k, [](const QUAT_SF_C& z) { return detail::sf::comp_ellint_1k(z); },
+                            [](W x) { return std::abs(x) <= W(1); },
+        [](T x, T y) { return detail::sf::sv::r_to_zero(x, y); });
 }
 /// E(k) for a quaternion modulus k.
 template <class T>
 [[nodiscard]] inline quaternion<T> comp_ellint_2(const quaternion<T>& k) {
     QUAT_SF_W;
-    return detail::sf::lift(k, [](const QUAT_SF_C& z) { return detail::sf::comp_ellint_2k(z); },
-                            [](W x) { return std::abs(x) <= W(1); });
+    return detail::sf::lift_s(k, [](const QUAT_SF_C& z) { return detail::sf::comp_ellint_2k(z); },
+                            [](W x) { return std::abs(x) <= W(1); },
+        [](T x, T y) { return detail::sf::sv::r_comp_ellint_2(x, y); });
 }
 /// Pi(nu, k) for real modulus |k| <= 1 and a quaternion characteristic nu.
 template <class T>
 [[nodiscard]] inline quaternion<T> comp_ellint_3(std::type_identity_t<T> k, const quaternion<T>& nu) {
     QUAT_SF_W;
     const W kk = static_cast<W>(k);
-    return detail::sf::lift(nu, [kk](const QUAT_SF_C& z) { return detail::sf::comp_ellint_3n(kk, z); },
-                            [](W x) { return x < W(1); });
+    return detail::sf::lift_s(nu, [kk](const QUAT_SF_C& z) { return detail::sf::comp_ellint_3n(kk, z); },
+                            [](W x) { return x < W(1); },
+        [](T x, T y) { return detail::sf::sv::r_to_zero(x, y); });
 }
 /// F(k, phi) for real |k| <= 1 and a quaternion amplitude phi.
 template <class T>
 [[nodiscard]] inline quaternion<T> ellint_1(std::type_identity_t<T> k, const quaternion<T>& phi) {
     QUAT_SF_W;
     const W kk = static_cast<W>(k);
-    return detail::sf::lift(phi, [kk](const QUAT_SF_C& z) { return detail::sf::ellint_1p(kk, z); },
-                            [kk](W) { return std::abs(kk) <= W(1); });
+    return detail::sf::lift_s(phi, [kk](const QUAT_SF_C& z) { return detail::sf::ellint_1p(kk, z); },
+                            [kk](W) { return std::abs(kk) <= W(1); },
+        [k](T x, T y) { return detail::sf::sv::r_ellint_1(static_cast<T>(k), x, y); });
 }
 /// E(k, phi) for real |k| <= 1 and a quaternion amplitude phi.
 template <class T>
 [[nodiscard]] inline quaternion<T> ellint_2(std::type_identity_t<T> k, const quaternion<T>& phi) {
     QUAT_SF_W;
     const W kk = static_cast<W>(k);
-    return detail::sf::lift(phi, [kk](const QUAT_SF_C& z) { return detail::sf::ellint_2p(kk, z); },
-                            [kk](W) { return std::abs(kk) <= W(1); });
+    return detail::sf::lift_s(phi, [kk](const QUAT_SF_C& z) { return detail::sf::ellint_2p(kk, z); },
+                            [kk](W) { return std::abs(kk) <= W(1); },
+        [k](T x, T y) { return detail::sf::sv::r_ellint_2(static_cast<T>(k), x, y); });
 }
 /// Pi(nu, k, phi) for real k, real phi and a quaternion characteristic nu.
 template <class T>
@@ -3086,8 +3894,9 @@ template <class T>
                                             std::type_identity_t<T> phi) {
     QUAT_SF_W;
     const W kk = static_cast<W>(k), ph = static_cast<W>(phi);
-    return detail::sf::lift(nu, [kk, ph](const QUAT_SF_C& z) { return detail::sf::ellint_3n(kk, z, ph); },
-                            [ph](W x) { const W s = detail::lm::sin(ph); return x * s * s < W(1); });
+    return detail::sf::lift_s(nu, [kk, ph](const QUAT_SF_C& z) { return detail::sf::ellint_3n(kk, z, ph); },
+                            [ph](W x) { const W s = detail::lm::sin(ph); return x * s * s < W(1); },
+        [](T x, T y) { return detail::sf::sv::r_to_zero(x, y); });
 }
 
 // ---- exponential, sine/cosine and Fresnel integrals ----------------------------------------
@@ -3095,13 +3904,14 @@ template <class T>
 template <class T>
 [[nodiscard]] inline quaternion<T> expint(const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::expint_ei(z); }, true);
+    return detail::sf::lift_s(q, [](const QUAT_SF_C& z) { return detail::sf::expint_ei(z); }, true,
+        [](T x, T y) { return detail::sf::sv::r_ei(x, y); });
 }
 /// E_n(q) = int_1^inf e^{-qt} t^{-n} dt (E_1 is the exponential integral E1).
 template <class T>
 [[nodiscard]] inline quaternion<T> expint(unsigned n, const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(
+    return detail::sf::lift_s(
         q,
         [n](const QUAT_SF_C& z) -> QUAT_SF_C {
             using namespace detail::sf;
@@ -3110,30 +3920,35 @@ template <class T>
             if (z == QUAT_SF_C()) return {W(1) / W(n - 1), W()};
             return detail::lm::exp(W(n - 1) * std::log(z)) * gamma_upper(W(1) - W(n), z);
         },
-        [n](W x) { return x > W() || (n > 1 && x == W()); });
+        [n](W x) { return x > W() || (n > 1 && x == W()); },
+        [n](T x, T y) { return detail::sf::sv::r_en(n, x, y); });
 }
 /// Sine integral Si(q) (entire) and cosine integral Ci(q).
 template <class T>
 [[nodiscard]] inline quaternion<T> sinint(const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::sici(z, false); }, true);
+    return detail::sf::lift_s(q, [](const QUAT_SF_C& z) { return detail::sf::sici(z, false); }, true,
+        [](T x, T y) { return detail::sf::sv::r_si(x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> cosint(const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::sici(z, true); },
-                            [](W x) { return x > W(); });
+    return detail::sf::lift_s(q, [](const QUAT_SF_C& z) { return detail::sf::sici(z, true); },
+                            [](W x) { return x > W(); },
+        [](T x, T y) { return detail::sf::sv::r_ci(x, y); });
 }
 /// Fresnel integrals S(q) = int_0^q sin(pi t^2/2) dt and C(q) (entire).
 template <class T>
 [[nodiscard]] inline quaternion<T> fresnel_s(const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::fresnel(z, true); }, true);
+    return detail::sf::lift_s(q, [](const QUAT_SF_C& z) { return detail::sf::fresnel(z, true); }, true,
+        [](T x, T y) { return detail::sf::sv::r_fresnel(true, x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> fresnel_c(const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [](const QUAT_SF_C& z) { return detail::sf::fresnel(z, false); }, true);
+    return detail::sf::lift_s(q, [](const QUAT_SF_C& z) { return detail::sf::fresnel(z, false); }, true,
+        [](T x, T y) { return detail::sf::sv::r_fresnel(false, x, y); });
 }
 
 // ---- polygamma, Hurwitz zeta, polylogarithm, Lambert W ------------------------------------
@@ -3141,7 +3956,8 @@ template <class T>
 template <class T>
 [[nodiscard]] inline quaternion<T> polygamma(unsigned m, const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [m](const QUAT_SF_C& z) { return detail::sf::polygamma_k(m, z); }, true);
+    return detail::sf::lift_s(q, [m](const QUAT_SF_C& z) { return detail::sf::polygamma_k(m, z); }, true,
+        [m](T x, T y) { return detail::sf::sv::r_polygamma(m, x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> trigamma(const quaternion<T>& q) {
@@ -3152,8 +3968,9 @@ template <class T>
 [[nodiscard]] inline quaternion<T> hurwitz_zeta(const quaternion<T>& s, std::type_identity_t<T> a) {
     QUAT_SF_W;
     const W wa = static_cast<W>(a);
-    return detail::sf::lift(s, [wa](const QUAT_SF_C& z) { return detail::sf::hurwitz_zeta_k(z, QUAT_SF_C(wa)); },
-                            [wa](W) { return wa > W(); });
+    return detail::sf::lift_s(s, [wa](const QUAT_SF_C& z) { return detail::sf::hurwitz_zeta_k(z, QUAT_SF_C(wa)); },
+                            [wa](W) { return wa > W(); },
+        [a](T x, T y) { return detail::sf::sv::r_hurwitz(static_cast<T>(a), x, y); });
 }
 /// Polylogarithm Li_s(q) for real s (cut [1, inf) on the real axis).
 template <class T, class N>
@@ -3161,20 +3978,23 @@ template <class T, class N>
 [[nodiscard]] inline quaternion<T> polylog(N s, const quaternion<T>& q) {
     QUAT_SF_W;
     const W ws = static_cast<W>(s);
-    return detail::sf::lift(q, [ws](const QUAT_SF_C& z) { return detail::sf::polylog_k(ws, z); },
-                            [](W x) { return x <= W(1); });
+    return detail::sf::lift_s(q, [ws](const QUAT_SF_C& z) { return detail::sf::polylog_k(ws, z); },
+                            [](W x) { return x <= W(1); },
+        [s](T x, T y) { return detail::sf::sv::r_polylog(static_cast<T>(s), x, y); });
 }
 /// Lambert W, branch k (k = 0 is the principal branch).
 template <class T>
 [[nodiscard]] inline quaternion<T> lambert_w(int k, const quaternion<T>& q) {
     QUAT_SF_W;
-    return detail::sf::lift(q, [k](const QUAT_SF_C& z) { return detail::sf::lambert_w_k(k, z); },
+    return detail::sf::lift_s(q, [k](const QUAT_SF_C& z) { return detail::sf::lambert_w_k(k, z); },
                             [k](W x) {
                                 const W e1 = W(1) / detail::lm::exp(W(1));
                                 if (k == 0) return x >= -e1;
                                 if (k == -1) return x >= -e1 && x < W();
                                 return false;
-                            });
+                            },
+        [k](T x, T y) { return detail::sf::sv::r_lambert_w(k, x, y); },
+        [k](W x) { return std::conj(detail::sf::lambert_w_k(-k, QUAT_SF_C(x, W()))); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> lambert_w(const quaternion<T>& q) {
@@ -3187,38 +4007,42 @@ template <class T>
 [[nodiscard]] inline quaternion<T> tgamma_upper(std::type_identity_t<T> a, const quaternion<T>& q) {
     QUAT_SF_W;
     const W wa = static_cast<W>(a);
-    return detail::sf::lift(q, [wa](const QUAT_SF_C& z) { return detail::sf::gamma_upper(wa, z); },
-                            [wa](W x) { return x > W() || (detail::sf::is_integer(wa) && wa > W()); });
+    return detail::sf::lift_s(q, [wa](const QUAT_SF_C& z) { return detail::sf::gamma_upper(wa, z); },
+                            [wa](W x) { return x > W() || (detail::sf::is_integer(wa) && wa > W()); },
+        [a](T x, T y) { return detail::sf::sv::r_gamma_inc(static_cast<T>(a), true, false, x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> tgamma_lower(std::type_identity_t<T> a, const quaternion<T>& q) {
     QUAT_SF_W;
     const W wa = static_cast<W>(a);
-    return detail::sf::lift(q, [wa](const QUAT_SF_C& z) { return detail::sf::gamma_lower(wa, z); },
-                            [wa](W x) { return x >= W() || (detail::sf::is_integer(wa) && wa > W()); });
+    return detail::sf::lift_s(q, [wa](const QUAT_SF_C& z) { return detail::sf::gamma_lower(wa, z); },
+                            [wa](W x) { return x >= W() || (detail::sf::is_integer(wa) && wa > W()); },
+        [a](T x, T y) { return detail::sf::sv::r_gamma_inc(static_cast<T>(a), false, false, x, y); });
 }
 /// Regularized P(a, q) = gamma(a, q)/Gamma(a) and Q(a, q) = Gamma(a, q)/Gamma(a), a > 0.
 template <class T>
 [[nodiscard]] inline quaternion<T> gamma_p(std::type_identity_t<T> a, const quaternion<T>& q) {
     QUAT_SF_W;
     const W wa = static_cast<W>(a);
-    return detail::sf::lift(
+    return detail::sf::lift_s(
         q,
         [wa](const QUAT_SF_C& z) {
             return wa > W() ? detail::sf::gamma_pq(wa, z).p : QUAT_SF_C(detail::sf::nan<W>(), W());
         },
-        [wa](W x) { return x >= W() || detail::sf::is_integer(wa); });
+        [wa](W x) { return x >= W() || detail::sf::is_integer(wa); },
+        [a](T x, T y) { return detail::sf::sv::r_gamma_inc(static_cast<T>(a), false, true, x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> gamma_q(std::type_identity_t<T> a, const quaternion<T>& q) {
     QUAT_SF_W;
     const W wa = static_cast<W>(a);
-    return detail::sf::lift(
+    return detail::sf::lift_s(
         q,
         [wa](const QUAT_SF_C& z) {
             return wa > W() ? detail::sf::gamma_pq(wa, z).q : QUAT_SF_C(detail::sf::nan<W>(), W());
         },
-        [wa](W x) { return x >= W() || detail::sf::is_integer(wa); });
+        [wa](W x) { return x >= W() || detail::sf::is_integer(wa); },
+        [a](T x, T y) { return detail::sf::sv::r_gamma_inc(static_cast<T>(a), true, true, x, y); });
 }
 /// Regularized incomplete beta I_q(a, b) and its complement 1 - I_q(a, b), real a, b > 0.
 template <class T>
@@ -3226,17 +4050,19 @@ template <class T>
                                          const quaternion<T>& q) {
     QUAT_SF_W;
     const W wa = static_cast<W>(a), wb = static_cast<W>(b);
-    return detail::sf::lift(q, [wa, wb](const QUAT_SF_C& z) { return detail::sf::ibeta_k(wa, wb, z); },
-                            [](W x) { return x >= W() && x <= W(1); });
+    return detail::sf::lift_s(q, [wa, wb](const QUAT_SF_C& z) { return detail::sf::ibeta_k(wa, wb, z); },
+                            [](W x) { return x >= W() && x <= W(1); },
+        [a, b](T x, T y) { return detail::sf::sv::r_ibeta(static_cast<T>(a), static_cast<T>(b), false, x, y); });
 }
 template <class T>
 [[nodiscard]] inline quaternion<T> ibetac(std::type_identity_t<T> a, std::type_identity_t<T> b,
                                           const quaternion<T>& q) {
     QUAT_SF_W;
     const W wa = static_cast<W>(a), wb = static_cast<W>(b);
-    return detail::sf::lift(
+    return detail::sf::lift_s(
         q, [wa, wb](const QUAT_SF_C& z) { return W(1) - detail::sf::ibeta_k(wa, wb, z); },
-        [](W x) { return x >= W() && x <= W(1); });
+        [](W x) { return x >= W() && x <= W(1); },
+        [a, b](T x, T y) { return detail::sf::sv::r_ibeta(static_cast<T>(a), static_cast<T>(b), true, x, y); });
 }
 
 #undef QUAT_SF_W
