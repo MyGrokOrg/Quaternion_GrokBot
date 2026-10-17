@@ -2,6 +2,17 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## Special values of the special functions (Annex G-style)
+
+Details are in the README section *Special functions: infinities, NaNs and signed zeros*.
+
+* **Policy.** For a non-finite argument each component of the result is the limit of that component along the ray (real axis, horizontal, vertical, diagonal), NaN where it has none; a NaN gives NaN (zeros kept where the function is real on the real axis); on a branch cut the sign of the zero `i` component chooses the side; odd functions give ±0 at ±0; poles follow the real functions (`tgamma(±0) = ±∞`, `digamma(±0) = ∓∞`, …). Implemented as one layer (`detail::sf::lift_s` with a rule per function) around the existing kernels; finite inputs with a nonzero vector part take exactly the old path.
+* **New test `test_sf_annexg`** (12 suites now): 144 functions/parameter sets, x, y ∈ {±0, ±½, ±1, ±1.5, ±2, ±∞, NaN}, six axes, float/double/long double; 157,710 checks. Before (header at 0ab188b, `riemann_zeta` left out because it crashed): 30,087 failed checks in float and 28,353 in double (the long double run did not finish in 25 minutes; the old kernels iterate long on infinite input). After: 0.
+* **Fix: `riemann_zeta` crashed** on (1.5, ∞, 0, 0), (0, 0, −∞, 0) and (∞, ∞, 0, 0): `zeta_em` built a `std::vector` of ~9·10¹⁸ entries from an infinite term count (segfault at `-O1`, `std::length_error` in a `noexcept` function at `-O0`). 3 crashing inputs → 0; |s| ≥ 10¹⁵ now returns NaN in the kernel.
+* **Fixes at finite points:** `erf(−0)`, `sinint(−0)`, `fresnel_s/c(−0)`, `cyl_bessel_j(1, −0)` gave +0 (now −0); `digamma(±0)` and `polygamma(m, ±0)`/(m, −n) gave NaN (now the pole values); `sph_neumann(2, −0)` gave −∞ (now +∞); `legendre(3, −0)` gave −0 (now +0); `cosint(−0)` gave −∞ + i0 (now −∞ + iπ).
+* **Signed zero on cuts.** Before, a zero vector part on a branch cut always gave the value above the cut and +0 for the `j`/`k` parts. Now the sign of the `i` component chooses the side (e.g. `cyl_bessel_j(2.25, −801.75 − i0)` is the conjugate of the value at +i0; one `test_special2` reference changed accordingly), and `j`/`k` zeros follow the `lift_sv` rule.
+* **Unchanged:** every golden hash (the special functions are not hashed), all finite results with a nonzero vector part, all other tests.
+
 ## Wider macOS and Windows testing: sanitizers, GCC on macOS, MinGW-w64, benchmarks
 
 Details are in the README section *Supported toolchains* and under *Benchmarks*.
