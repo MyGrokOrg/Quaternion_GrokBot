@@ -2668,6 +2668,9 @@ template <class T>
 // limit of a component growing like c * infinity; a zero c is a zero limit (c's zero)
 template <class T>
 [[nodiscard]] inline T ci(T c) { return c == T() ? c : std::copysign(inf<T>, c); }
+// the signed zero of y, +0 otherwise (not "y == 0 ? y : 0": MSVC folds that to +0)
+template <class T>
+[[nodiscard]] inline T zs(T y) { return y == T() ? std::copysign(T(), y) : T(); }
 template <class T>
 [[nodiscard]] inline res<T> cinf(T c, T s) { return hit(ci(c), ci(s)); }
 // cos and sin of (p pi + e x), p with exact cospi/sinpi at half-integers, e = +-1
@@ -2979,7 +2982,7 @@ template <class T>
 template <class T>
 [[nodiscard]] inline res<T> r_to_zero(T x, T y) {  // functions tending to 0 on every ray
     QSV_FIN return miss<T>();
-    return hit(T(), y == T() ? y : T());
+    return hit(T(), zs(y));
 }
 template <class T>
 [[nodiscard]] inline res<T> r_comp_ellint_2(T x, T y) {
@@ -3126,7 +3129,7 @@ template <class T>
     else if (x > T()) th = T();
     else th = std::copysign(pi, y);
     const T im = th + 2 * pi * T(kb);
-    return hit(inf<T>, im == T() ? (y == T() ? y : T()) : im);
+    return hit(inf<T>, im == T() ? zs(y) : im);
 }
 // incomplete gamma: Gamma(a, z) ~ z^{a-1} e^{-z}
 template <class T>
@@ -3180,7 +3183,7 @@ template <class T>
     while (n > 0 && c[static_cast<std::size_t>(n)] == L(0)) --n;
     const auto C = [&c](int k) { return c[static_cast<std::size_t>(k)]; };
     const auto lim = [](int k, L v) { return k == 0 ? static_cast<T>(v) : std::copysign(inf<T>, static_cast<T>(v)); };
-    if (n == 0) return {static_cast<T>(C(0)), y == T() ? y : T()};
+    if (n == 0) return {static_cast<T>(C(0)), zs(y)};
     if (std::isfinite(y)) {  // x = +-inf: Re ~ c_n x^n, Im ~ n c_n x^{n-1} y
         const L sx = x > T() ? L(1) : L(-1);
         const L re = C(n) * (n % 2 ? sx : L(1));
@@ -3744,7 +3747,7 @@ template <class T>
         if (!quat::detail::is_finite(theta)) {
             const T c00 = T(0.5) / detail::lm::sqrt(quat::detail::pi_v<T>);
             return detail::sf::sv::poly_sv(theta, true, [&](T x_, T y_) -> std::complex<T> {
-                if (l == 0) return {c00, y_ == T() ? y_ : T()};
+                if (l == 0) return {c00, detail::sf::sv::zs(y_)};
                 if (!std::isinf(y_)) return {detail::sf::nan<T>(), y_ == T() ? y_ : detail::sf::nan<T>()};
                 if (std::isinf(x_)) return {detail::sf::nan<T>(), detail::sf::nan<T>()};
                 // Y ~ N (-1)^m (i e^{-i theta} / 2)^m (e^{-i theta} / 2)^{l-m} P_l^{(m)} leading term
