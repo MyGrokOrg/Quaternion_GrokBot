@@ -2,7 +2,7 @@
 """Randomized accuracy check of the special functions against mpmath.
 
     fuzz.py --exe build/quaternion_fuzz_eval [--seed S] [--n N] [--types double,"long double"]
-            [--only fn1,fn2] [--report report.md]
+            [--only fn1,fn2] [--report report.md] [--points points.tsv] [--replay points.tsv]
 
 Inputs are exact binary floating-point numbers (so the comparison measures the library, not
 input rounding).  Each function is sampled over several regions: exactly on the real axis,
@@ -13,6 +13,13 @@ scale is |ref| except where the documented accuracy is absolute (oscillatory fun
 their zeros, see ENVELOPE below).  Any error above the per-function bound in BOUNDS is
 reported and makes the script exit with status 1.  The seed is printed so a failing run can
 be reproduced exactly.
+
+--points writes every sample (failed or not) with its full input, the evaluator's output, the
+error and the bound, one tab-separated line per sample and type, next to the seed in a header
+line.  A failing point can be rerun on its own from that file or from the report: each failure
+line carries the exact evaluator input (`fn p1 p2 x y axis`, hex floats), and --replay FILE
+reruns the samples of a points file (all of them, or the lines you keep) instead of drawing new
+ones.
 """
 import argparse, math, os, random, subprocess, sys, time
 import mpmath as mp
@@ -293,14 +300,35 @@ def main():
     ap.add_argument("--types", default="double,long double")
     ap.add_argument("--only", default="")
     ap.add_argument("--report", default="")
+    ap.add_argument("--points", default="", help="write every sample with its inputs and error to this file")
+    ap.add_argument("--replay", default="", help="rerun the samples of a --points file instead of drawing new ones")
     a = ap.parse_args()
     seed = a.seed if a.seed is not None else int.from_bytes(os.urandom(4), "little")
-    print("fuzz seed: %d   (reproduce with --seed %d --n %d)" % (seed, seed, a.n), flush=True)
+    if a.replay:
+        print("fuzz replay of %s" % a.replay, flush=True)
+    else:
+        print("fuzz seed: %d   (reproduce with --seed %d --n %d)" % (seed, seed, a.n), flush=True)
     mp.mp.dps = 40
     fns = [f for f in BOUNDS if not a.only or f in a.only.split(",")]
     rng = random.Random(seed)
     samples = []
-    for fn in fns:
+    if a.replay:
+        # the file lists each sample once per type: keep each as often as in any one type
+        count, kept, order = {}, {}, []
+        for line in open(a.replay):
+            if line.startswith("#") or not line.strip():
+                continue
+            c = line.rstrip("\n").split("\t")
+            smp = (c[1], float.fromhex(c[2]), float.fromhex(c[3]), float.fromhex(c[4]), float.fromhex(c[5]), int(c[6]), c[7])
+            if smp[0] in fns:
+                k = (c[0], smp)
+                count[k] = count.get(k, 0) + 1
+                if count[k] > kept.get(smp, 0):
+                    kept[smp] = count[k]
+                    order.append(smp)
+        samples = order
+        fns = [f for f in fns if any(smp[0] == f for smp in samples)]
+    for fn in (fns if not a.replay else []):
         for _ in range(a.n):
             p1, p2, x, y, tag = regions(fn, rng)
             axis = rng.choice([1, 2, 3, -1, -2, -3]) if y != 0 else 1
@@ -316,6 +344,7 @@ def main():
     rows, failures, known = [], [], []
     t0 = time.time()
     refs = {}
+    points = []  # (type, fn, p1, p2, x, y, axis, tag, got, status, err, bound)
     for t in a.types.split(","):
         inp = "".join("%s %s %s %s %s %d\n" % (fn, hexf(p1), hexf(p2), hexf(x), hexf(y), axis)
                       for fn, p1, p2, x, y, axis, tag in samples)
@@ -331,9 +360,12 @@ def main():
                 except Exception as e:  # mpmath failure: skip the point
                     refs[key] = (None, None)
             ref, sc = refs[key]
+            pt = (t, fn, p1, p2, x, y, axis, tag, line.strip())
             if ref is None or not mp.isfinite(abs(ref)) or sc == 0:
+                points.append(pt + ("skip: no reference", "", ""))
                 continue
             if not (RANGE[t][0] <= abs(ref) <= RANGE[t][1]):
+                points.append(pt + ("skip: out of range", "", ""))
                 continue  # under/overflows in T
             re, im = (H(v) for v in line.split())
             got = mp.mpc(re, im)
@@ -353,13 +385,20 @@ def main():
                 worst[fn] = (err, p1, x, y, tag)
             if not err <= b and (fn, tag) in KNOWN:
                 known.append((t, fn, err, tag))
+                status = "known"
             elif not err <= b:
-                failures.append((t, fn, err, b, p1, x, y, tag, re, im, ref))
+                failures.append((t, fn, err, b, p1, p2, x, y, axis, tag, re, im, ref))
+                status = "FAIL"
+            else:
+                status = "ok"
+            points.append(pt + (status, "%.4g" % err, "%g" % b))
         for fn in fns:
             if fn in worst:
                 err, p1, x, y, tag = worst[fn]
                 rows.append((t, fn, err, bound(fn, p1, x, y, tag), p1, x, y, tag))
-    lines = ["# mpmath fuzz report", "", "seed `%d`, %d samples per function and type, %.0f s" % (seed, a.n, time.time() - t0), "",
+    src = ("replay of `%s`, %d samples per type" % (a.replay, len(samples)) if a.replay else
+           "seed `%d`, %d samples per function and type" % (seed, a.n))
+    lines = ["# mpmath fuzz report", "", "%s, %.0f s" % (src, time.time() - t0), "",
              "| type | function | worst (eps) | bound | at p, z |", "|---|---|---|---|---|"]
     for t, fn, err, b, p1, x, y, tag in rows:
         lines.append("| %s | %s | %.3g | %g | p=%r, z=%r%s%ri (%s) |" % (t, fn, err, b, p1, x, "+" if float(y) >= 0 else "", y, tag))
@@ -370,17 +409,28 @@ def main():
             kw[(t, fn, tag)] = max(kw.get((t, fn, tag), 0), err)
         lines += ["* %s %s [%s]: worst %.3g eps" % (t, fn, tag, e) for (t, fn, tag), e in sorted(kw.items())]
     lines += ["", "## %d failure(s)" % len(failures), ""]
-    for t, fn, err, b, p1, x, y, tag, re, im, ref in failures[:200]:
-        lines.append("* %s %s(p=%s, z=%s%s%si) [%s]: %.3g eps > %g; got %s%s%si, mpmath %s" % (
+    if failures:
+        lines += ["Each failure ends with its evaluator input: `echo '<input>' | quaternion_fuzz_eval '<type>'`.", ""]
+    for t, fn, err, b, p1, p2, x, y, axis, tag, re, im, ref in failures[:200]:
+        lines.append("* %s %s(p=%s, z=%s%s%si) [%s]: %.3g eps > %g; got %s%s%si, mpmath %s; input `%s %s %s %s %s %d`" % (
             t, fn, float(p1).hex(), float(x).hex(), "+" if float(y) >= 0 else "", float(y).hex(), tag, err, b,
-            mp.nstr(re, 20), "+" if im >= 0 else "", mp.nstr(im, 20), mp.nstr(ref, 20)))
+            mp.nstr(re, 20), "+" if im >= 0 else "", mp.nstr(im, 20), mp.nstr(ref, 20),
+            fn, hexf(p1), hexf(p2), hexf(x), hexf(y), axis))
+    if a.points:
+        with open(a.points, "w") as f:
+            f.write("# fuzz.py %s; columns: type fn p1 p2 x y axis tag got status err_eps bound "
+                    "(axis 1/2/3 = i/j/k, 4 = (2,3,6)/7, negative = reversed; vector part y on it)\n"
+                    % (("replay of %s" % a.replay) if a.replay else "--seed %d --n %d" % (seed, a.n)))
+            for t, fn, p1, p2, x, y, axis, tag, got, status, err, b in points:
+                f.write("\t".join([t, fn, hexf(p1), hexf(p2), hexf(x), hexf(y), str(axis), tag, got, status, err, b]) + "\n")
     text = "\n".join(lines) + "\n"
     print(text)
     if a.report:
         open(a.report, "w").write(text)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         open(os.environ["GITHUB_STEP_SUMMARY"], "a").write(text)
-    print("fuzz seed: %d" % seed)
+    if not a.replay:
+        print("fuzz seed: %d" % seed)
     sys.exit(1 if failures else 0)
 
 

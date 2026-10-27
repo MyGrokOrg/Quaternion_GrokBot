@@ -62,13 +62,15 @@ jobs:
         run: |
           seed="${{ github.event.inputs.seed }}"
           n="${{ github.event.inputs.samples }}"
-          python3 fuzz/fuzz.py --exe build/quaternion_fuzz_eval --n "${n:-250}" ${seed:+--seed "$seed"} --report fuzz-report.md
+          python3 fuzz/fuzz.py --exe build/quaternion_fuzz_eval --n "${n:-250}" ${seed:+--seed "$seed"} --report fuzz-report.md --points fuzz-points.tsv
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-report-${{ matrix.compiler.name }}
-          path: fuzz-report.md
+          path: |
+            fuzz-report.md
+            fuzz-points.tsv
 
   # Windows: MSVC (latest toolset) and clang-cl, x64 on windows-latest and ARM64 on
   # windows-11-arm.  The /arch:AVX2 builds contract a*b+c into fma (MSVC only with
@@ -104,13 +106,15 @@ jobs:
         run: |
           seed="${{ github.event.inputs.seed }}"
           n="${{ github.event.inputs.samples }}"
-          python fuzz/fuzz.py --exe build/Release/quaternion_fuzz_eval.exe --types double --n "${n:-250}" ${seed:+--seed "$seed"} --report fuzz-report.md
+          python fuzz/fuzz.py --exe build/Release/quaternion_fuzz_eval.exe --types double --n "${n:-250}" ${seed:+--seed "$seed"} --report fuzz-report.md --points fuzz-points.tsv
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-report-${{ matrix.name }}
-          path: fuzz-report.md
+          path: |
+            fuzz-report.md
+            fuzz-points.tsv
 
   # macOS: Apple Clang (Xcode, the SDK's libc++).  arm64 on macos-latest, where Clang contracts
   # a*b+c into fma by default and long double is double (as on Windows): double only.  x86_64
@@ -141,13 +145,15 @@ jobs:
         run: |
           seed="${{ github.event.inputs.seed }}"
           n="${{ github.event.inputs.samples }}"
-          python fuzz/fuzz.py --exe build/quaternion_fuzz_eval --types "${{ matrix.types }}" --n "${n:-250}" ${seed:+--seed "$seed"} --report fuzz-report.md
+          python fuzz/fuzz.py --exe build/quaternion_fuzz_eval --types "${{ matrix.types }}" --n "${n:-250}" ${seed:+--seed "$seed"} --report fuzz-report.md --points fuzz-points.tsv
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-report-${{ matrix.name }}
-          path: fuzz-report.md
+          path: |
+            fuzz-report.md
+            fuzz-points.tsv
 
   # Informational: the same stress points through non-FMA and FMA builds of gcc and clang,
   # all compared with mpmath (fuzz/fma_audit.py); the table goes to the job summary.

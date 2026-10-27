@@ -98,13 +98,15 @@ jobs:
           cmake --build build -j 4 --target quaternion_fuzz_eval
       - name: Fuzz (long double, informational)
         run: |
-          python fuzz/fuzz.py --exe build/quaternion_fuzz_eval --types "long double" --n "${{ github.event.inputs.fuzz_samples }}" --seed "${{ github.event.inputs.fuzz_seed }}" --report fuzz-ld-${{ matrix.name }}.md || true
+          python fuzz/fuzz.py --exe build/quaternion_fuzz_eval --types "long double" --n "${{ github.event.inputs.fuzz_samples }}" --seed "${{ github.event.inputs.fuzz_seed }}" --report fuzz-ld-${{ matrix.name }}.md --points fuzz-ld-points-${{ matrix.name }}.tsv || true
           cat fuzz-ld-${{ matrix.name }}.md >> $GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: fuzz-ld-${{ matrix.name }}
-          path: fuzz-ld-*.md
+          path: |
+            fuzz-ld-*.md
+            fuzz-ld-points-*.tsv
   shim:
     # The library on macOS x86_64 with Apple's long double libm (QUATERNION_X87_LIBM=0), with
     # only the 8 inaccurate functions replaced by correctly rounded MPFR versions linked into
@@ -140,7 +142,7 @@ jobs:
         run: ./ts2 2>&1 | grep -E 'accuracy limits|eps, tolerance|passed|failed|FAIL' | tee ts2-${{ matrix.variant }}.txt || true
       - name: Fuzz long double (informational)
         run: |
-          python fuzz/fuzz.py --exe ./fe --types "long double" --n "${{ github.event.inputs.fuzz_samples }}" --seed "${{ github.event.inputs.fuzz_seed }}" --report fuzz-ld-${{ matrix.variant }}.md || true
+          python fuzz/fuzz.py --exe ./fe --types "long double" --n "${{ github.event.inputs.fuzz_samples }}" --seed "${{ github.event.inputs.fuzz_seed }}" --report fuzz-ld-${{ matrix.variant }}.md --points fuzz-ld-points-${{ matrix.variant }}.tsv || true
           cat fuzz-ld-${{ matrix.variant }}.md >> $GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         if: always()
@@ -148,6 +150,7 @@ jobs:
           name: shim-${{ matrix.variant }}
           path: |
             fuzz-ld-*.md
+            fuzz-ld-points-*.tsv
             ts2-*.txt
   bench:
     # Before/after on macOS x86_64, Apple Clang: the benchmark suite's long double cases and the
