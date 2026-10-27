@@ -2656,6 +2656,15 @@ template <class T, class F, class G>
     const auto m = [s](T x) {
         return x == T() ? quat::detail::zero_prod(static_cast<T>(s), x) : static_cast<T>(static_cast<W>(x) * s);
     };
+    if (!std::isfinite(s) && std::isfinite(r.imag())) {
+        // Im f / |v| overflowed for a finite Im f (Y_66.08(-0.00118 + 9.8e-6 i): Im Y = -3.2e303,
+        // |v| = 9.8e-6, gave -inf): scale the unit vector instead, (x / |v|) Im f with
+        // |x / |v|| <= 1.  Only here, so the bits are unchanged wherever Im f / |v| is finite.
+        const auto mu = [&](T x) {
+            return x == T() ? m(x) : static_cast<T>((static_cast<W>(x) / v) * r.imag());
+        };
+        return {static_cast<T>(r.real()), mu(q.x()), mu(q.y()), mu(q.z())};
+    }
     return {static_cast<T>(r.real()), m(q.x()), m(q.y()), m(q.z())};
 }
 template <class T, class F>

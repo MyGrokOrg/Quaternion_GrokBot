@@ -1444,4 +1444,22 @@ TEST(neumann_near_overflow) {
     CHECK(std::abs(y.x() / -8.2071771255193703861e+304 - 1) < 1e-12);
 }
 
+// Y_nu next to overflow with a tiny vector part (nu = 66.08, |v| = 9.8e-6): Im Y / |v|
+// overflowed in the axis lift and the vector part came out -inf (nightly fuzz, GCC 14
+// -march=haswell, run 39596294670, seed 1825170956).
+TEST(neumann_tiny_vector_part_near_overflow) {
+    const double nu = 0x1.08541ecd4a7d7p+6, x = -0x1.3453cbf6dbd70p-10, v = 0x1.47b3afd4d3dfdp-17;
+    // mpmath: -1.0740363798166803146e+304 - 3.2122832892242358381e+303 i
+    const double re = -1.0740363798166803146e+304, im = -3.2122832892242358381e+303;
+    const auto y = quat::cyl_neumann(nu, quaternion<double>(x, v, 0, 0));
+    CHECK(std::abs(y.w() / re - 1) < 1e-12);
+    CHECK(std::abs(y.x() / im - 1) < 1e-12);
+    // the same on an oblique axis (0.6, 0, 0.8): each component is (u_k) Im Y
+    const auto z = quat::cyl_neumann(nu, quaternion<double>(x, 0.6 * v, 0, 0.8 * v));
+    CHECK(std::abs(z.w() / re - 1) < 1e-12);
+    CHECK(std::abs(z.x() / (0.6 * im) - 1) < 1e-12);
+    CHECK(z.y() == 0);
+    CHECK(std::abs(z.z() / (0.8 * im) - 1) < 1e-12);
+}
+
 TEST_MAIN
