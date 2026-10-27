@@ -256,6 +256,15 @@ def envelope(fn, p1, x, y, ref):
         s = max(s, min(mp.mpf(1), abs(mp.exp(z)) / 8))
     if fn == "digamma":
         s = max(s, mp.mpf(1))
+    if fn == "hurwitz_zeta" and x >= 0:
+        # Near a zero of zeta(s, a) for Re s >= 0 (e.g. s = 0.226, a = 0.416 on the real axis,
+        # where zeta = 0.00238 and the larger term is 1.22) the value is the difference of the two
+        # leading terms of Hermite's formula (DLMF 25.11.29), a^-s / 2 and a^(1-s) / (s - 1),
+        # plus the integral, and an error of eps times the larger term is the accuracy limit.
+        # Only there, i.e. when |zeta| < L / 16 with L = max(|a^-s|, |a^(1-s) / (s - 1)|),
+        # the scale is L / 16; everywhere else it stays |zeta| (no looser bound).
+        L = max(abs(mp.power(p1, -z)), abs(mp.power(p1, 1 - z) / (z - 1)))
+        s = max(s, L / 16)
     if fn == "hurwitz_zeta" and x < 0:
         # Left of 0 (Re s < 0), zeta(s, a) has real zeros where the growing terms
         # (a + n)^-s cancel; the accuracy there is relative to the largest such term.
