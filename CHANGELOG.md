@@ -2,6 +2,12 @@
 
 Accuracy figures are worst-case errors against mpmath on random exact inputs (300 points per region unless noted), double / x87 long double.
 
+## Fixes for the nightly fuzz failures
+
+Each fix has its own commit and regression test.
+
+* **`asinl` next to ±1 on x86_64 macOS and MinGW-w64 (`QUATERNION_X87_LIBM`).** Apple's `asinl` is off by up to 4.14e3 ulp next to ±1 (`fuzz/libm_check_full.cpp`, seed 12, new range `asin@pm1`: x = ±(1 − d), d ∈ [2⁻⁴¹, 2⁻¹), 300 inputs; median 12.8 ulp, 221 of 300 off by more than 1 ulp; [run 40534324484](https://github.com/MyGrokOrg/Quaternion_GrokBot/actions/runs/40534324484)). New kernel `detail::lm::asin` for |x| > 1/2: atan2(|x|, √((1 − |x|)(1 + |x|))) with the product in double length; 4.14e3 → 0.468 ulp there (glibc 2.41 on a local Intel Xeon: 0.435), 0.712 → 0.685 on (−1, 1). `acosl` is accurate there (0.931) and stays Apple's. Fuzz in long double on `macos-15-intel`, 250 samples, the nightly seeds 892322074 and 3346008858: 1 and 3 failures before (all quaternion `asin` on the real axis next to ±1, worst 324 and 1.13e3 ε, bound 16; [run 40534297612](https://github.com/MyGrokOrg/Quaternion_GrokBot/actions/runs/40534297612), [run 40534310904](https://github.com/MyGrokOrg/Quaternion_GrokBot/actions/runs/40534310904)), 0 after (worst `asin` 1.76 and 1.65 ε, as on Linux; [run 40534324484](https://github.com/MyGrokOrg/Quaternion_GrokBot/actions/runs/40534324484), [run 40534337990](https://github.com/MyGrokOrg/Quaternion_GrokBot/actions/runs/40534337990)). Regression test: `test_x87_libm` checks 492 mpmath references (the 10 inputs of the failing nightly runs, 480 random ones next to ±1 and in (1/2, 1), and ±1) at 1 ulp; with the kernel on (GCC 14 and Clang 19) 467 are correctly rounded and none is off by more than 1 ulp. The README's *Fine* entry `asinl` 0.71 only held away from ±1. `fuzz/libm_check_full.cpp` draws the new range after the old ones (their inputs are unchanged), and its kernel results are still the same bits on macOS and Linux (7,349 of them).
+
 ## Special values of the special functions (Annex G-style)
 
 Details are in the README section *Special functions: infinities, NaNs and signed zeros*.

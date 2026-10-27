@@ -926,7 +926,7 @@ inline void asin_acos_kernel(T x, T y, T& asin_re, T& acos_re, T& im) noexcept {
     const T safe_max = detail::lm::sqrt(std::numeric_limits<T>::max()) / T(8);
     const T safe_min = detail::lm::sqrt(std::numeric_limits<T>::min()) * T(4);
     if (y == T() && x <= T(1)) {
-        asin_re = std::asin(x);
+        asin_re = detail::lm::asin(x);
         acos_re = std::acos(x);
         im = T();
         return;
@@ -951,7 +951,7 @@ inline void asin_acos_kernel(T x, T y, T& asin_re, T& acos_re, T& im) noexcept {
     const T A = (r + s) / T(2), B = x / A;
     // Real parts.
     if (B <= b_cross) {
-        asin_re = std::asin(B);
+        asin_re = detail::lm::asin(B);
         acos_re = std::acos(B);
     } else if (x <= T(1)) {
         const T d = detail::lm::sqrt(T(0.5) * (A + x) * (y * (y / (r + xp1)) + (s - xm1)));

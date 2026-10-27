@@ -33,6 +33,10 @@ struct cref {
     const char* f;
     ld xr, xi, rr, ri;
 };
+constexpr ld AREF_BOUND = 1.0L;
+const ref arefs[] = {
+#include "x87_arefs.inc"
+};
 const cref crefs[] = {
 #include "x87_crefs.inc"
 };
@@ -104,6 +108,26 @@ TEST(mpmath_references) {
     for (int i = 0; i < ns; ++i)
         std::printf("  %-7.*s %4d references, %4d correctly rounded, the others 1 ulp off\n",
                     static_cast<int>(s[i].f.size()), s[i].f.data(), s[i].n, s[i].exact);
+}
+
+TEST(asin_near_one) {
+    // tests/x87_arefs.inc: the ten inputs at which the nightly fuzz caught Apple's asinl (22 to
+    // 1130 ulp there), 320 points +-(1 - d) with d from 2^-64 to 1/2, 160 in 1/2 < |x| < 1, +-1
+    ld worst = 0;
+    int exact = 0, n = 0;
+    for (const ref& t : arefs) {
+        const ld got = lm::asin(t.x);
+        const ld d = ulps(got, t.r);
+        if (!(d <= AREF_BOUND)) std::fprintf(stderr, "  asin(%La) = %La, reference %La (%Lg ulp)\n", t.x, got, t.r, d);
+        CHECK(d <= AREF_BOUND);
+        worst = std::max(worst, d);
+        exact += same_bits(got, t.r);
+        ++n;
+    }
+    std::printf("  asin  %4d references, %4d correctly rounded, at most %.3Lf ulp (bound %Lg)\n", n, exact, worst, AREF_BOUND);
+    CHECK(same_bits(lm::asin(-1.0L), -lm::asin(1.0L)) && std::signbit(lm::asin(-0.0L)));
+    CHECK(std::isnan(lm::asin(1.5L)) && std::isnan(lm::asin(std::numeric_limits<ld>::quiet_NaN())));
+    CHECK(same_bits(lm::asin(0.25L), std::asin(0.25L)) && same_bits(lm::asin(-0.5L), std::asin(-0.5L)));
 }
 
 TEST(complex_mpmath_references) {
@@ -207,6 +231,7 @@ static_assert(has<long double (*)(long double) noexcept>(&lm::tan));
 static_assert(has<long double (*)(long double) noexcept>(&lm::sinh));
 static_assert(has<long double (*)(long double) noexcept>(&lm::expm1));
 static_assert(has<long double (*)(long double, long double) noexcept>(&lm::pow));
+static_assert(has<long double (*)(long double) noexcept>(&lm::asin));
 static_assert(has<long double (*)(long double) noexcept>(&lm::tgamma));
 static_assert(has<long double (*)(long double) noexcept>(&lm::lgamma));
 static_assert(has<cld (*)(const cld&) noexcept>(&lm::exp));
