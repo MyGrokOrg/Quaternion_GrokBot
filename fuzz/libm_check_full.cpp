@@ -5,8 +5,8 @@
 //   c++ -std=c++23 -O2 fuzz/libm_check_full.cpp -o libm_check_full
 //   ./libm_check_full 12 300 > out.txt && python3 fuzz/libm_check_full.py out.txt   (seed, samples)
 //   With -DLIBM_CHECK_LM -Iinclude, the functions the library replaces under
-//   QUATERNION_X87_LIBM (sin, cos, tan, sinh, expm1, pow, tgamma, lgamma; asin and acos for
-//   |x| > 1/2) are called through
+//   QUATERNION_X87_LIBM (sin, cos, tan, sinh, expm1, pow, tgamma, lgamma; asin for |x| > 1/2)
+//   are called through
 //   quat::detail::lm instead, i.e. what the headers use (the library's own kernels where the
 //   macro is on, the C library's otherwise).
 #include <cmath>
@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
         x = U(-1, 1);            P1("sinh@small", x, F::sinh(x)); P1("cosh@small", x, std::cosh(x)); P1("tanh@small", x, std::tanh(x));
         x = U(-40, 40);          P1("sinh@mid", x, F::sinh(x)); P1("cosh@mid", x, std::cosh(x)); P1("tanh@mid", x, std::tanh(x));
         x = U(-11000, 11000);    P1("sinh@wide", x, F::sinh(x)); P1("cosh@wide", x, std::cosh(x));
-        x = U(-1, 1);            P1("asin", x, F::asin(x)); P1("acos", x, F::acos(x));
+        x = U(-1, 1);            P1("asin", x, F::asin(x)); P1("acos", x, std::acos(x));
         x = U(-5, 5);            P1("atan@mid", x, std::atan(x));
         x = LU(-60, 60);         P1("atan@wide", x, std::atan(x));
         { long double a = LU(-30, 30), b = LU(-30, 30); P2("atan2", a, b, std::atan2(a, b)); }
@@ -88,6 +88,6 @@ int main(int argc, char** argv) {
     for (int i = 0; i < n; ++i) {
         const long double d = std::ldexp(U(1, 2), -2 - (int)(g() % 39ULL));
         const long double x = (g() & 1) ? -(1 - d) : 1 - d;
-        P1("asin@pm1", x, F::asin(x)); P1("acos@pm1", x, F::acos(x));
+        P1("asin@pm1", x, F::asin(x)); P1("acos@pm1", x, std::acos(x));
     }
 }
