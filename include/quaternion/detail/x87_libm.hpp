@@ -1,5 +1,6 @@
 // Own long double kernels for the C library functions that Apple's x87 libm (macOS x86_64)
-// and mingw-w64's (MinGW-w64 x86_64) get wrong: sinl, cosl, tanl, sinhl, expm1l, powl, tgammal and lgammal, and the
+// and mingw-w64's (MinGW-w64 x86_64) get wrong: sinl, cosl, tanl, sinhl, expm1l, powl, tgammal and lgammal (and asinl and acosl
+// next to +-1), and the
 // std::complex<long double> functions the headers call that libc++ builds on them (exp, sin,
 // cos, sinh, cosh, sqrt and polar).  See the README, "Supported toolchains".
 //
@@ -16,6 +17,7 @@
 //     LDBL_MAX is reduced to within 2^-190 of a quadrant); then Taylor kernels on |r| <= pi/4.
 //   * exp, expm1, sinh: x = k ln2 + r with ln2 in three parts; Taylor kernel for e^r - 1.
 //   * pow(x, y) = exp(y log x) with log x double-length (atanh series).
+//   * asin, acos for |x| > 1/2: atan2 of a double-length sqrt((1 - |x|)(1 + |x|)).
 //   * lgamma: Stirling for x >= 20, upward shift below, Taylor series next to the zeros at 1
 //     and 2, reflection for x < 0; tgamma = exp(lgamma) with the sign, exact small factorials.
 // Constants: tests/gen/gen_x87_constants.py (mpmath).  Tests: tests/test_x87_libm.cpp.
@@ -750,6 +752,32 @@ inline void sincos(ld x, ld& s, ld& c) noexcept {
     }
     if (x < 0) s = -s;
 }
+// asin and acos for 1/2 < |x| <= 1, where Apple's asinl and acosl lose up to about 1100 ulp
+// next to +-1 (fuzz, 1 - |x| down to 6e-12).  t = sqrt((1 - a)(1 + a)), a = |x|, double-length
+// (1 - a exact, 1 + a and the product as dd, then one Newton step for the square root); then
+// asin a = atan2(a, t) and acos x = atan2(t, x), with the first-order correction for t.lo
+// (d/dt atan2(a, t) = -a and d/dt atan2(t, x) = x, as a^2 + t^2 = 1).  atan2l is accurate on
+// Apple's libm (the same bits as glibc's) and is well conditioned there.
+inline void asin_acos_t(ld a, ld& th, ld& tl) noexcept {
+    const dd p = mul(fast_two_sum(1.0L, a), 1.0L - a);
+    th = std::sqrt(p.hi);
+    const dd sq = two_prod(th, th);
+    tl = th == 0 ? 0.0L : ((p.hi - sq.hi) - sq.lo + p.lo) / (2 * th);
+}
+[[nodiscard]] inline ld asin(ld x) noexcept {
+    const ld a = std::fabs(x);
+    if (!(a > 0.5L) || a > 1) return std::asin(x);
+    ld th, tl;
+    asin_acos_t(a, th, tl);
+    return std::copysign(std::atan2(a, th) - a * tl, x);
+}
+[[nodiscard]] inline ld acos(ld x) noexcept {
+    const ld a = std::fabs(x);
+    if (!(a > 0.5L) || a > 1) return std::acos(x);
+    ld th, tl;
+    asin_acos_t(a, th, tl);
+    return std::atan2(th, x) + x * tl;
+}
 }  // namespace x87
 
 // ---- overloads (preferred to the forwarders in quaternion.hpp for long double) ----
@@ -773,6 +801,8 @@ template <class A, class B>
 [[nodiscard]] inline long double pow(A x, B y) noexcept {
     return x87::pow(static_cast<long double>(x), static_cast<long double>(y));
 }
+[[nodiscard]] inline long double asin(long double x) noexcept { return x87::asin(x); }
+[[nodiscard]] inline long double acos(long double x) noexcept { return x87::acos(x); }
 [[nodiscard]] inline long double tgamma(long double x) noexcept { return x87::tgamma(x); }
 [[nodiscard]] inline long double lgamma(long double x) noexcept { return x87::lgamma(x); }
 

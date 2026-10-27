@@ -108,6 +108,8 @@ namespace lm {
 QUAT_LM_FWD(sin)
 QUAT_LM_FWD(cos)
 QUAT_LM_FWD(tan)
+QUAT_LM_FWD(asin)
+QUAT_LM_FWD(acos)
 QUAT_LM_FWD(sinh)
 QUAT_LM_FWD(cosh)
 QUAT_LM_FWD(exp)
