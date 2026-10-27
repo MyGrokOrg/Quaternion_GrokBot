@@ -1911,6 +1911,24 @@ template <class T>
         head += detail::lm::exp(-s * std::log(a));
         a += T(1);
     }
+    // Below that bound the integrand's peak is about e^{g(a)} times its value at t = 0,
+    //   g(a) = |Im s| atan(t*/a) - 2 pi t*,  t*^2 = |Im s| a / (2 pi) - a^2  (0 if t*^2 <= 0),
+    // and the integral cancels down to the result.  For Re a next to lo - 1 (a = 1.0076 went
+    // to 0.0076, g = 6.3) that cost 486 eps at s = 0.164 + 4.600i.  Shifting a up by one more
+    // lowers g but scales the a^-s terms by ((a + 1)/a)^{-Re s}, which for Re s < 0 is
+    // itself a loss (a = 0.25 -> 1.25 at s = -10 gave 332 eps): shift when the first gain
+    // is larger.
+    const auto growth = [&](T x) {
+        const T y = std::abs(s.imag()), t2 = y * x / (T(2) * pi<T>) - x * x;
+        if (!(t2 > T())) return T();
+        const T ts = detail::lm::sqrt(t2);
+        return std::max(T(), y * std::atan(ts / x) - T(2) * pi<T> * ts);
+    };
+    if (a.real() > T() && growth(a.real()) - growth(a.real() + T(1)) >
+                              std::max(T(), -s.real()) * std::log((a.real() + T(1)) / a.real())) {
+        head += detail::lm::exp(-s * std::log(a));
+        a += T(1);
+    }
     const T twopi = T(2) * pi<T>;
     const cplx<T> I = de_half_infinite<T>([&](T t) -> cplx<T> {
         // (a - it)^{-s} - (a + it)^{-s} = e^{-sc} (e^{sd} - e^{-sd}), with

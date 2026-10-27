@@ -1386,7 +1386,7 @@ namespace {
 // Regressions found by the nightly mpmath fuzz job (fuzz/fuzz.py): zeta next to s = 0
 // (zeta(1-s) with 1-s rounded), Li_s for s next to a positive integer (two 1/delta poles, and
 // the series cut short next to a trivial zero of zeta(s-k)), and W_0 for 1 < |z| <= 3 where
-// Halley's iteration converged to W_{+-1}.
+// Halley's iteration converged to W_{+-1}, and zeta(s, a) for a just above 1.
 struct fzref { std::string_view fn; long double p, x, y, re, im; };
 constexpr fzref fuzz_regressions[] = {
     {"zeta", 0x0.0p+0L, -0x1.ad7f29abcaf48p-24L, 0x0.0p+0L, -0.499999908106156711314008738166L, 0.0L},
@@ -1406,6 +1406,9 @@ constexpr fzref fuzz_regressions[] = {
     {"lambert_w", 0x0.0p+0L, -0x1.765a0cdd442e5p+0L, 0x0.0p+0L, -0.0508443625975613769498396267996L, 1.53774411359148551106456934792L},
     {"lambert_w", 0x0.0p+0L, -0x1.6ea21727e1203p+0L, 0x1.edfd6d58c389ap-7L, -0.060564724160155532843020832246L, 1.52045824277353027718588187658L},
     {"lambert_w", 0x0.0p+0L, -0x1.0000000000000p+0L, 0x0.0p+0L, -0.318131505204764135312654251588L, 1.33723570143068940890116214319L},
+    // zeta(s, a) in the critical strip with a just above 1: a was shifted to 0.0076 and the
+    // integral cancelled (486 eps in double)
+    {"hurwitz_zeta", 0x1.01f448092574ap+0L, 0x1.4fec61e281340p-3L, 0x1.266bd97b1e700p+2L, 0.614479365542354249018840256572L, 0.186197696816865708659878748623L},
 };
 template <class T> void fuzz_regression() {
     if constexpr (std::is_same_v<T, float>) { return; } else {  // (else: no C4702 on MSVC)  // inputs are doubles
@@ -1417,6 +1420,7 @@ template <class T> void fuzz_regression() {
         quaternion<T> got;
         if (r.fn == "zeta") got = quat::riemann_zeta(q);
         else if (r.fn == "polylog") got = quat::polylog(static_cast<T>(r.p), q);
+        else if (r.fn == "hurwitz_zeta") got = quat::hurwitz_zeta(q, static_cast<T>(r.p));
         else got = quat::lambert_w(q);
         const double err = static_cast<double>(abs(got - want) / abs(want) / e);
         worst = std::max(worst, err);
