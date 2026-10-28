@@ -356,6 +356,29 @@ constexpr T hypot(T x, T y) noexcept {
 }
 }  // namespace cx
 
+// x 2^n for float and double at run time without a library call, when that is one exact
+// multiplication: x and the result are normal and 2^n is a normal number. Exact scaling has no
+// rounding, so these are the bits std::scalbn gives; everything else (zeros, subnormals,
+// infinities, NaNs, overflow, a power of two outside the normal range) goes to std::scalbn.
+// mingw-w64's x86_64 scalbn is x87 fscale code (store, fscale, store, reload), and quaternion
+// division makes eight such calls.
+template <class T>
+inline T scalbn_run(T x, int n) noexcept {
+#if !defined(QUATERNION_NO_FAST_SCALBN)
+    if constexpr (cx::fmt_kind<T> == 1 || cx::fmt_kind<T> == 2) {
+        using L = std::numeric_limits<T>;
+        using U = std::conditional_t<cx::fmt_kind<T> == 1, std::uint32_t, std::uint64_t>;
+        constexpr int mbits = L::digits - 1;
+        constexpr int bias = L::max_exponent - 1;
+        const int be = static_cast<int>((std::bit_cast<U>(x) >> mbits) & U(2 * bias + 1));
+        if (be != 0 && be != 2 * bias + 1 && n >= 1 - bias && n <= bias &&
+            be + n >= 1 && be + n <= 2 * bias)
+            return x * std::bit_cast<T>(static_cast<U>(n + bias) << mbits);
+    }
+#endif
+    return std::scalbn(x, n);
+}
+
 // Wrappers: the constexpr helper in constant evaluation, the std:: call at run time.
 template <class T> constexpr bool c_isnan(T x) noexcept { if consteval { return cx::isnan(x); } else { return std::isnan(x); } }
 template <class T> constexpr bool c_isinf(T x) noexcept { if consteval { return cx::isinf(x); } else { return std::isinf(x); } }
@@ -370,7 +393,7 @@ template <class T> constexpr T c_logb(T x) noexcept { if consteval { return cx::
 #if defined(__APPLE__) && (defined(__x86_64__) || defined(__i386__))
 template <class T> constexpr T c_scalbn(T x, int n) noexcept { return cx::scalbn(x, n); }
 #else
-template <class T> constexpr T c_scalbn(T x, int n) noexcept { if consteval { return cx::scalbn(x, n); } else { return std::scalbn(x, n); } }
+template <class T> constexpr T c_scalbn(T x, int n) noexcept { if consteval { return cx::scalbn(x, n); } else { return scalbn_run(x, n); } }
 #endif
 template <class T> constexpr T c_hypot(T x, T y) noexcept { if consteval { return cx::hypot(x, y); } else { return std::hypot(x, y); } }
 
