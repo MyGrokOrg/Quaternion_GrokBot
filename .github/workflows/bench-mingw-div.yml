@@ -1,0 +1,54 @@
+name: Diagnostic - MinGW division (scalbn)
+
+# One MinGW-w64 job on one runner: records the CPU, times std::scalbn / std::logb and
+# core/div + core/scalar_div with and without the exact power-of-two scalbn fast path
+# (-DQUATERNION_NO_FAST_SCALBN builds "before"), alternating the two builds.
+on:
+  workflow_dispatch:
+  push:
+    branches: [diag/mingw-div]
+
+jobs:
+  mingw:
+    name: mingw div before/after
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc
+      - name: CPU
+        run: |
+          { echo '### CPU'; echo '```'; grep -m1 'model name' /proc/cpuinfo; grep -m1 -E 'cpu family|vendor_id' /proc/cpuinfo; nproc; g++ --version | head -1; echo '```'; } | tee -a $GITHUB_STEP_SUMMARY
+          powershell -NoProfile -Command "Get-CimInstance Win32_Processor | Format-List Name,Manufacturer,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors" | tee -a $GITHUB_STEP_SUMMARY
+      - name: Build
+        run: |
+          F="-std=c++23 -O3 -DNDEBUG -Iinclude"
+          g++ $F bench/bench.cpp -o bench_before.exe -DQUATERNION_NO_FAST_SCALBN
+          g++ $F bench/bench.cpp -o bench_after.exe
+          g++ $F tools/scalbn_probe.cpp -o probe_before.exe -DQUATERNION_NO_FAST_SCALBN
+          g++ $F tools/scalbn_probe.cpp -o probe_after.exe
+          g++ -std=c++23 -O3 -DNDEBUG -Iinclude -S bench/bench.cpp -o bench_after.s
+          g++ -std=c++23 -O3 -DNDEBUG -Iinclude -S bench/bench.cpp -o bench_before.s -DQUATERNION_NO_FAST_SCALBN
+      - name: Run
+        run: |
+          for round in 1 2 3; do
+            for v in before after; do
+              echo "=== round $round: div, $v ==="
+              ./bench_$v.exe --filter div --min-time 0.5 | tee -a div_$v.txt
+            done
+          done
+          for v in before after; do echo "=== probe $v ==="; ./probe_$v.exe | tee probe_$v.txt; done
+          for v in before after; do echo "=== probe $v (second run) ==="; ./probe_$v.exe | tee -a probe_$v.txt; done
+          { echo '### results'; echo '```'; for f in div_before.txt div_after.txt probe_before.txt probe_after.txt; do echo "--- $f"; cat $f; done; echo '```'; } >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mingw-div
+          path: |
+            div_*.txt
+            probe_*.txt
+            *.s

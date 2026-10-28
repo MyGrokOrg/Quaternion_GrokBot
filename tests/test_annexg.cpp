@@ -315,8 +315,56 @@ template <class T> void arithmetic() {
     CHECK(quat::pow(Q(I, 0, 0, 0), T(2)).w() == I);
     CHECK(quat::pow(Q(0, 0, 0, 0), Q(2)) == Q(0));
 }
+
+// The run-time scalbn of the division (an exact multiplication by 2^n where that is one,
+// std::scalbn otherwise) against std::scalbn and the exact constexpr helper, bit for bit:
+// every edge of the fast path (|n| at the largest and smallest normal power of two, results
+// that are subnormal or overflow, zeros of both signs, infinities, NaNs) and random operands.
+template <class T> bool same_bits(T a, T b) {
+    if (std::isnan(a) || std::isnan(b)) return std::isnan(a) && std::isnan(b);
+    return a == b && std::signbit(a) == std::signbit(b);
+}
+template <class T> void scalbn_edges() {
+    using L = std::numeric_limits<T>;
+    std::vector<T> xs = {T(0), T(1), T(1.5), T(3), L::min(), L::max(), L::denorm_min(), L::min() / 2,
+                         L::max() / 2, L::min() * T(1.5), L::max() * T(0.75), L::infinity(), L::quiet_NaN(),
+                         std::nextafter(L::min(), T(0)), std::nextafter(T(1), T(0)), T(0.1)};
+    std::uint64_t s = 12345;
+    const auto next = [&s] { s = s * 6364136223846793005ULL + 1442695040888963407ULL; return s >> 11; };
+    for (int i = 0; i < 60; ++i)  // random mantissa, exponent anywhere (normal and subnormal)
+        xs.push_back(std::ldexp(static_cast<T>(1 + static_cast<double>(next() % (1ULL << 52)) / 4503599627370496.0),
+                                static_cast<int>(next() % (2 * L::max_exponent + L::digits)) + L::min_exponent - L::digits - 1));
+    const int span = 2 * L::max_exponent + L::digits + 8;
+    long n_checked = 0;
+    bool all_same = true;
+    const int step = L::digits > 53 ? 37 : 1;  // (long double takes the std::scalbn path throughout)
+    for (const T a : xs)
+        for (const T x : {a, -a})
+            for (int n = -span; n <= span; n += step) {
+                const T r = quat::detail::scalbn_run(x, n);
+                all_same = all_same && same_bits(r, std::scalbn(x, n)) && same_bits(r, quat::detail::cx::scalbn(x, n));
+                ++n_checked;
+            }
+    CHECK(all_same);
+    // the largest and smallest normal powers of two and their neighbours, on a normal operand
+    const int lo = L::min_exponent - 1, hi = L::max_exponent - 1;  // 2^lo = min(), 2^hi = max_exponent-1
+    for (const int n : {lo - 1, lo, lo + 1, hi - 1, hi, hi + 1, -hi, -lo, 0, 1, -1})
+        for (const T x : {T(1), T(-1), T(1.75), L::min(), L::max(), -L::max()}) {
+            CHECK(same_bits(quat::detail::scalbn_run(x, n), std::scalbn(x, n)));
+            CHECK(same_bits(quat::detail::scalbn_run(x, n), quat::detail::cx::scalbn(x, n)));
+        }
+    CHECK(quat::detail::scalbn_run(L::max(), 1) == L::infinity());
+    CHECK(quat::detail::scalbn_run(-L::max(), 2) == -L::infinity());
+    CHECK(quat::detail::scalbn_run(T(1), L::min_exponent - L::digits - 1) == T(0));
+    CHECK(quat::detail::scalbn_run(T(1), L::min_exponent - L::digits) == L::denorm_min());
+    CHECK(std::signbit(quat::detail::scalbn_run(T(-0.0), 5)) && quat::detail::scalbn_run(T(-0.0), 5) == T(0));
+    CHECK(std::isnan(quat::detail::scalbn_run(L::quiet_NaN(), 3)));
+    CHECK(quat::detail::scalbn_run(-L::infinity(), -9) == -L::infinity());
+    CHECK(n_checked > 1000);
+}
 }  // namespace
 
+TEST(scalbn_run_edges) { FOR_EACH_TYPE(scalbn_edges); }
 TEST(annexg_tables) { FOR_EACH_TYPE(tables); std::printf("  %d table entries x axes checked\n", entries); }
 TEST(finite_mpmath_refs) { FOR_EACH_TYPE(finite_refs); }
 TEST(annexg_arithmetic) { FOR_EACH_TYPE(arithmetic); }
