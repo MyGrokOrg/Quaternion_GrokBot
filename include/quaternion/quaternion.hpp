@@ -362,7 +362,15 @@ constexpr T hypot(T x, T y) noexcept {
 // infinities, NaNs, overflow, a power of two outside the normal range) goes to std::scalbn.
 // mingw-w64's x86_64 scalbn is x87 fscale code (store, fscale, store, reload), and quaternion
 // division makes eight such calls.
+// (Not inlined, like the library call it replaces: inlined, GCC and clang-cl order the operands
+// of the commutative operations around it differently, which changed the sign of some NaN
+// results of division, and the bit-identity jobs compare those bits.)
 template <class T>
+#if defined(_MSC_VER) && !defined(__clang__)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
 inline T scalbn_run(T x, int n) noexcept {
 #if !defined(QUATERNION_NO_FAST_SCALBN)
     if constexpr (cx::fmt_kind<T> == 1 || cx::fmt_kind<T> == 2) {
