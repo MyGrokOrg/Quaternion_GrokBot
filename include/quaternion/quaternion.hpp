@@ -892,6 +892,13 @@ template <class T>
     const T f = v / vlen;
     // A zero component times an infinite f is a signed zero, not 0*inf = NaN.
     const auto m = [f](T x) { return x == T() ? std::copysign(T(), x) * (std::signbit(f) ? T(-1) : T(1)) : x * f; };
+    if (!std::isfinite(f) && std::isfinite(v)) {
+        // v / vlen overflowed (a subnormal vlen, e.g. log(-1 + 1e-310 i) gave +inf for pi):
+        // scale the unit vector instead, (x / vlen) v with |x / vlen| <= 1.  Only here, so the
+        // bits are unchanged wherever v / vlen is finite.
+        const auto mu = [&](T x) { return x == T() ? m(x) : (x / vlen) * v; };
+        return {s, mu(q.x()), mu(q.y()), mu(q.z())};
+    }
     return {s, m(q.x()), m(q.y()), m(q.z())};
 }
 

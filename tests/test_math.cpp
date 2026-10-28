@@ -1,5 +1,6 @@
 #include "test_framework.hpp"
 #include <numbers>
+#include <quaternion/special_functions.hpp>
 using quat::quaternion;
 
 // Any quaternion with a fixed unit axis behaves like a complex number; check
@@ -97,6 +98,29 @@ template <class T> void log_near_unit() {
     CHECK(quat::log(Q(T(0.5), T(0.5), T(0.5), T(-0.5))).w() == T(0));
 }
 TEST(log_near_unit_circle) { FOR_EACH_TYPE(log_near_unit); }
+
+// A subnormal vector part: the unit vector u = v / |v| is exact, but the result's vector part
+// f * u was formed as (x * (f / |v|)) and f / |v| overflowed (log(-1 + 1e-310 i) gave +inf for pi,
+// and sqrt gave inf, inf for (0.6, 0.8); acos took another path and was already right, kept as a
+// guard).  References: mpmath: pi, 0.6 pi, 0.8 pi, 0.6, 0.8, acosh 2 = 1.3169578969248167.
+template <class T> void subnormal_vector_part() {
+    using Q = quaternion<T>;
+    const T t = std::numeric_limits<T>::min() / T(256);  // 3t and 4t are exact subnormals; |v| = 5t
+    const T tol = std::numeric_limits<T>::epsilon() * T(8);
+    const T pi = static_cast<T>(3.14159265358979323846264338328L), ach2 = static_cast<T>(1.31695789692481670862504634731L);
+    const auto near = [&](T a, T b) { return std::abs(a - b) <= tol * std::abs(b); };
+    for (int ax = 0; ax < 2; ++ax) {  // i axis, and the axis (0.6, 0.8, 0)
+        const T a = ax ? T(3) * t : t, b = ax ? T(4) * t : T();
+        const T ux = ax ? T(0.6L) : T(1), uy = ax ? T(0.8L) : T(0);
+        const Q l = quat::log(Q(T(-1), a, b, T()));
+        CHECK(l.w() == T() && near(l.x(), pi * ux) && (uy == T() ? l.y() == T() : near(l.y(), pi * uy)) && l.z() == T());
+        const Q r = quat::sqrt(Q(T(-1), a, b, T()));
+        CHECK(near(r.x(), ux) && (uy == T() ? r.y() == T() : near(r.y(), uy)) && r.z() == T());
+        const Q c = quat::acos(Q(T(-2), a, b, T()));
+        CHECK(near(c.w(), pi) && near(c.x(), -ach2 * ux) && (uy == T() ? c.y() == T() : near(c.y(), -ach2 * uy)) && c.z() == T());
+    }
+}
+TEST(subnormal_vector_part) { FOR_EACH_TYPE(subnormal_vector_part); }
 
 template <class T> void polar_proj() {
     using Q = quaternion<T>;
