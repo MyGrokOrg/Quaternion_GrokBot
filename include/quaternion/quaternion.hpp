@@ -356,6 +356,45 @@ constexpr T hypot(T x, T y) noexcept {
 }
 }  // namespace cx
 
+// QUATERNION_FAST_SCALBN: x 2^n for float and double at run time without a library call, when
+// that is one exact multiplication: x and the result are normal and 2^n is a normal number.
+// Exact scaling has no rounding, so these are the bits std::scalbn gives; everything else
+// (zeros, subnormals, infinities, NaNs, overflow, a power of two outside the normal range) goes
+// to std::scalbn. On by default with MinGW-w64, whose x86_64 scalbn is x87 fscale code (store,
+// fscale, store, reload) and which quaternion division calls eight times. Elsewhere it is off
+// and the code is unchanged: with it on, GCC and clang-cl order the operands of the commutative
+// operations around the call differently, which changed the sign of some NaN results of division
+// (the raw hashes of the bit-identity jobs compare those bits against the pre-constexpr header).
+#ifndef QUATERNION_FAST_SCALBN
+#  if defined(__MINGW32__)
+#    define QUATERNION_FAST_SCALBN 1
+#  else
+#    define QUATERNION_FAST_SCALBN 0
+#  endif
+#endif
+#if QUATERNION_FAST_SCALBN
+// (Not inlined, like the library call it replaces: inlined, the operand order changed more.)
+template <class T>
+#if defined(_MSC_VER) && !defined(__clang__)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+inline T scalbn_run(T x, int n) noexcept {
+    if constexpr (cx::fmt_kind<T> == 1 || cx::fmt_kind<T> == 2) {
+        using L = std::numeric_limits<T>;
+        using U = std::conditional_t<cx::fmt_kind<T> == 1, std::uint32_t, std::uint64_t>;
+        constexpr int mbits = L::digits - 1;
+        constexpr int bias = L::max_exponent - 1;
+        const int be = static_cast<int>((std::bit_cast<U>(x) >> mbits) & U(2 * bias + 1));
+        if (be != 0 && be != 2 * bias + 1 && n >= 1 - bias && n <= bias &&
+            be + n >= 1 && be + n <= 2 * bias)
+            return x * std::bit_cast<T>(static_cast<U>(n + bias) << mbits);
+    }
+    return std::scalbn(x, n);
+}
+#endif
+
 // Wrappers: the constexpr helper in constant evaluation, the std:: call at run time.
 template <class T> constexpr bool c_isnan(T x) noexcept { if consteval { return cx::isnan(x); } else { return std::isnan(x); } }
 template <class T> constexpr bool c_isinf(T x) noexcept { if consteval { return cx::isinf(x); } else { return std::isinf(x); } }
@@ -369,6 +408,8 @@ template <class T> constexpr T c_logb(T x) noexcept { if consteval { return cx::
 // changed the bits of quaternion division there; it gets the exact helper at run time too.
 #if defined(__APPLE__) && (defined(__x86_64__) || defined(__i386__))
 template <class T> constexpr T c_scalbn(T x, int n) noexcept { return cx::scalbn(x, n); }
+#elif QUATERNION_FAST_SCALBN
+template <class T> constexpr T c_scalbn(T x, int n) noexcept { if consteval { return cx::scalbn(x, n); } else { return scalbn_run(x, n); } }
 #else
 template <class T> constexpr T c_scalbn(T x, int n) noexcept { if consteval { return cx::scalbn(x, n); } else { return std::scalbn(x, n); } }
 #endif

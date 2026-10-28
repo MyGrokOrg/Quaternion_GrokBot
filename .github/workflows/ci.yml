@@ -22,6 +22,10 @@ jobs:
           # macOS x86_64 default) and tested against mpmath and glibc (tests/test_x87_libm.cpp)
           - { name: gcc-14 x87-libm, cxx: g++-14, flags: "-DQUATERNION_X87_LIBM=1" }
           - { name: clang-19-libcxx x87-libm, cxx: clang++-19, flags: "-stdlib=libc++ -DQUATERNION_X87_LIBM=1", llvm: 19 }
+          # the exact power-of-two scalbn of division (QUATERNION_FAST_SCALBN, the MinGW-w64 default),
+          # forced on here: test_annexg's scalbn_run_edges and every golden hash
+          - { name: gcc-14 fast-scalbn, cxx: g++-14, flags: "-DQUATERNION_FAST_SCALBN=1" }
+          - { name: clang-19-libstdcxx fast-scalbn, cxx: clang++-19, flags: "-DQUATERNION_FAST_SCALBN=1", llvm: 19 }
     name: ${{ matrix.compiler.name }} (${{ matrix.build_type }})
     steps:
       - uses: actions/checkout@v5
