@@ -257,6 +257,16 @@ def envelope(fn, p1, x, y, ref):
             s = max(s, abs(mp.hankel1(p1, mp.mpc(-y, x))) * (mp.exp(abs(x)) if x < 0 else 1))
     if fn in ("airy_ai", "airy_bi") and x < 0:
         s = max(s, abs(mp.airyai(z)), abs(mp.airybi(z)))
+    if fn == "airy_bi" and x >= 0:
+        # Next to a zero of Bi in the right half plane (the zeros lie along arg z = +-pi/3, e.g.
+        # 5.41394 + 9.58610i), Bi is the difference of two terms of the size of Ai there, and
+        # the condition number |z Bi'/Bi| (526 at 5.4274 + 9.6021i, 0.021 from that zero) makes
+        # an error of a few eps * |Ai| the accuracy limit.  Only where |Bi| < |Ai| / 4, which
+        # excludes Bi's whole growth sector and every point farther from a zero than that, the
+        # scale is |Ai| (x < 0 already uses max(|Ai|, |Bi|)); elsewhere it stays |Bi|.
+        ai = abs(mp.airyai(z))
+        if s < ai / 4:
+            s = ai
     if fn in ("lgamma",):  # absolute near the zeros of log Gamma (z = 1, 2)
         s = max(s, mp.mpf(1))
     if fn == "expint":  # absolute next to the real zero of Ei (x = 0.3725...)
