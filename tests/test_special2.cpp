@@ -1502,10 +1502,13 @@ template <class T> void log_dd_accuracy() {
     }
 }
 // riemann_zeta at 18 points (Re s = 2, 1/2, -3/2; Im s = 10 ... 1e6), as computed by the header
-// with two Newton steps in log_dd (commit 637a6e5, through the quaternion overload), binary64 and x87 binary80 bits.  Both
-// agree to the last bit with the one-exp log_dd; the bits are compared exactly where the libm
-// is known to give the same bits (libc++ on glibc, no FMA contraction, no x87 kernels) and to
-// 16 eps elsewhere.
+// with two Newton steps in log_dd (commit 637a6e5, through the quaternion overload), binary64
+// and x87 binary80 bits.  The one-exp log_dd gives the same bits on the machine that made them
+// (clang 22.1.8 from Zig 0.17.0, libc++, glibc 2.41, x86-64 without FMA; building with
+// -DQUATERNION_TEST_EXACT_ZETA_BITS compares them exactly there).  The last bits of sin, cos
+// and exp and of the C++ library's complex exp are not the same on every libm and library
+// (CI's libc++ jobs on Ubuntu 24.04 differ in the last bits), so by default the results must
+// be within 16 eps of the stored ones.
 struct zref { double re, im; double wre, wim; long double lre, lim; };
 constexpr zref zeta_refs[] = {
     {2, 10, 0x1.32aefb2d936f9p+0, -0x1.4448470bf762bp-4, 0x9.9577d96c9b7c62dp-3L, -0xa.2242385fbb158d9p-7L},
@@ -1531,8 +1534,8 @@ template <class T> void zeta_em_bits() {
     if constexpr (std::is_same_v<T, float>) { return; } else {
     constexpr bool ld = std::is_same_v<T, long double>;
     if constexpr (ld) if (std::numeric_limits<long double>::digits != 64) return;
-#if defined(_LIBCPP_VERSION) && defined(__GLIBC__) && !QTEST_FP_CONTRACT && !QUATERNION_X87_LIBM
-    constexpr bool exact = true;
+#if defined(QUATERNION_TEST_EXACT_ZETA_BITS)
+    constexpr bool exact = true;   // opt-in: same compiler, libm and C++ library as the stored bits
 #else
     constexpr bool exact = false;
 #endif
