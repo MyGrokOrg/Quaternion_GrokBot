@@ -260,12 +260,15 @@ template <class T>
     for (int i = 0; i < 8; ++i) s = s * (s + T(2));
     return ldexp(s + T(1), static_cast<int>(k));
 }
-// log of a positive double-T value by Newton's method on exp_dd.
+// log of a positive double-T value, from one exp_dd: with y0 = std::log(x.hi) and
+// u = x exp(-y0) - 1 (|u| ~ eps), log x = y0 + log1p(u) = y0 + u - u^2/2 + O(u^3), and u^3 is
+// far below the double-T rounding.  (Two Newton steps, y += x exp(-y) - 1, gave the same
+// double-T results at twice the cost: the second step only supplies the -u^2/2.)
 template <class T>
 [[nodiscard]] inline dd<T> log_dd(const dd<T>& x) noexcept {
-    dd<T> y{std::log(x.hi), T()};
-    for (int i = 0; i < 2; ++i) y = y + x * exp_dd(-y) - T(1);
-    return y;
+    const dd<T> y{std::log(x.hi), T()};
+    const dd<T> u = x * exp_dd(-y) - T(1);
+    return y + (u - dd<T>{u.hi * u.hi / T(2), T()});
 }
 // sin and cos of a real T value with |a| <= 4, to double-T precision.
 template <class T>

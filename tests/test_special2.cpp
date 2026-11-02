@@ -1462,4 +1462,100 @@ TEST(neumann_tiny_vector_part_near_overflow) {
     CHECK(std::abs(z.z() / (0.8 * im) - 1) < 1e-12);
 }
 
+// ---- log_dd (one exp_dd) and the Euler-Maclaurin zeta that uses it ---------------------------
+// log_dd(x) = y0 + u - u^2/2 with u = x exp(-y0) - 1, one exp_dd instead of two Newton steps.
+namespace {
+struct logref { double x, hi, lo; long double lhi, llo; };
+// ln x = hi + lo, correctly rounded pieces (mpmath, 200 bits), binary64 and x87 binary80.
+constexpr logref log_refs[] = {
+    {2.0, 0x1.62e42fefa39efp-1, 0x1.abc9e3b39803fp-56, 0x2c5c85fdf473de6bp-62L, -0xd871319ff0342543p-130L},
+    {3.0, 0x1.193ea7aad030bp+0, -0x1.a256f99caabebp-54, 0x8c9f53d5681854bbp-63L, 0x520cc6aa829dbe5bp-127L},
+    {5.0, 0x1.9c041f7ed8d33p+0, 0x1.abf7dde94581dp-54, 0x19c041f7ed8d336bp-60L, -0x82216ba7e29b382fp-130L},
+    {7.0, 0x1.f2272ae325a57p+0, 0x1.51bda525b3c98p-54, 0xf913957192d2baa3p-63L, 0x7b4a4b67930df023p-127L},
+    {11.0, 0x1.32ee3b77f374cp+1, -0x1.210e8d00cd605p-53, 0x4cbb8eddfcdd2edfp-61L, -0x7468066b025a0b9bp-128L},
+    {13.0, 0x1.485042b318c51p+1, -0x1.798231075c028p-59, 0x290a08566318a1fdp-60L, 0xcfb9df147fb04103p-128L},
+    {101.0, 0x1.275e2271bba31p+2, -0x1.071c9869ac045p-52, 0x49d7889c6ee8c2f9p-60L, -0xe4c34d60226f332dp-127L},
+    {1009.0, 0x1.baab757a0aed2p+2, 0x1.f3e86bf2c0a18p-52, 0x1baab757a0aed27dp-58L, -0x5e5034fd79ea59dp-122L},
+    {65537.0, 0x1.62e44fef939f0p+3, -0x1.fdc98de7beec6p-53, 0xb17227f7c9cf7f01p-60L, 0x6ce4308227435b59p-126L},
+    {300007.0, 0x1.9391e88e5c2c0p+3, 0x1.17ea222b1a797p-51, 0xc9c8f4472e16023p-56L, -0xaeeea72c34449435p-126L},
+    {0x1.8p-1, -0x1.269621134db92p-2, -0x1.e0efadd9db02bp-56, -0x49a58844d36e49e1p-64L, 0x41489893f5563d5dp-130L},
+    {0x1.8p+0, 0x1.9f323ecbf984cp-2, -0x1.a92e513217f5cp-59, 0x67cc8fb2fe612fcbp-64L, -0x4b944c85fd6ef3f3p-129L},
+    {0x1.34ap+10, 0x1.c79436f818745p+2, -0x1.ae1edb99b4c9ep-53, 0x71e50dbe061d1329p-60L, -0x3db7336993c1335dp-126L},
+    {0x1p-14, -0x1.3687a9f1af2b1p+3, -0x1.3b28539e9281cp-51, -0x4da1ea7c6bcac53bp-59L, -0xa14e7a4a06e92fb3p-125L},
+};
+template <class T> void log_dd_accuracy() {
+    if constexpr (std::is_same_v<T, float>) { return; } else {
+    constexpr bool ld = std::is_same_v<T, long double>;
+    if constexpr (ld) if (std::numeric_limits<long double>::digits != 64) return;  // table is x87
+    using quat::detail::sf::dd;
+    const long double e2 = static_cast<long double>(std::numeric_limits<T>::epsilon()) * std::numeric_limits<T>::epsilon();
+    long double worst = 0;
+    for (const auto& r : log_refs) {
+        const dd<T> got = quat::detail::sf::log_dd(dd<T>{static_cast<T>(r.x), T()});
+        const long double rh = ld ? r.lhi : static_cast<long double>(r.hi), rl = ld ? r.llo : static_cast<long double>(r.lo);
+        const long double err = std::fabs(((static_cast<long double>(got.hi) - rh) + (static_cast<long double>(got.lo) - rl)) / rh) / e2;
+        worst = std::max(worst, err);
+        if (!(err <= 16)) std::fprintf(stderr, "   log_dd(%g): %.3Lg eps^2\n", r.x, err);
+        qtest::check(err <= 16, "log_dd(x) within 16 eps^2 of ln x");
+    }
+    std::printf("  [%s] log_dd: worst %.3Lg eps^2 (eps^2 = 2^-%d)\n", qtest::current_type, worst, 2 * (std::numeric_limits<T>::digits - 1));
+    }
+}
+// riemann_zeta at 18 points (Re s = 2, 1/2, -3/2; Im s = 10 ... 1e6), as computed by the header
+// with two Newton steps in log_dd (commit 637a6e5, through the quaternion overload), binary64 and x87 binary80 bits.  Both
+// agree to the last bit with the one-exp log_dd; the bits are compared exactly where the libm
+// is known to give the same bits (libc++ on glibc, no FMA contraction, no x87 kernels) and to
+// 16 eps elsewhere.
+struct zref { double re, im; double wre, wim; long double lre, lim; };
+constexpr zref zeta_refs[] = {
+    {2, 10, 0x1.32aefb2d936f9p+0, -0x1.4448470bf762bp-4, 0x9.9577d96c9b7c62dp-3L, -0xa.2242385fbb158d9p-7L},
+    {2, 100, 0x1.30d6fc206835ap+0, -0x1.b979887f406bep-5, 0x9.86b7e10341ad21p-3L, -0xd.cbcc43fa035f221p-8L},
+    {2, 1000, 0x1.e811fb2490163p-1, -0x1.c58597d746bccp-4, 0xf.408fd92480b1636p-4L, -0xe.2c2cbeba35e5acbp-7L},
+    {2, 10000, 0x1.d839be10ed901p-1, -0x1.0890319688b53p-2, 0xe.c1cdf0876c806dap-4L, -0x8.44818cb445a9d1bp-5L},
+    {2, 100000, 0x1.275ff93da58acp+0, 0x1.4bba1a2e6b05fp-2, 0x9.3affc9ed2c55fe1p-3L, 0xa.5dd0d173582f825p-5L},
+    {2, 1e+06, 0x1.edfbdf878dd45p-1, 0x1.1d65deeca15dap-2, 0xf.6fdefc3c6ea2a86p-4L, 0x8.eb2ef7650aed227p-5L},
+    {0.5, 10, 0x1.8b7e40ceebd84p+0, -0x1.d86b0ca605912p-4, 0xc.5bf206775ec20b9p-3L, -0xe.c35865302c87688p-7L},
+    {0.5, 100, 0x1.58a7c4b6c7bffp+1, -0x1.4e01349c0f812p-6, 0xa.c53e25b63dffad9p-2L, -0xa.7009a4e07c1f6bcp-9L},
+    {0.5, 1000, 0x1.6ce2ea9629c3fp-2, 0x1.dd2ed1da2d615p-1, 0xb.671754b14e1f22dp-5L, 0xe.e9768ed16b0cb03p-4L},
+    {0.5, 10000, -0x1.5b84ce5dcfd2ep-2, -0x1.2fda86a3a8696p-5, -0xa.dc2672ee7e963abp-5L, -0x9.7ed4351d43535d8p-8L},
+    {0.5, 100000, 0x1.12b239e360026p+0, 0x1.71f96c2c4ae8bp+2, 0x8.9591cf1b0012c44p-3L, 0xb.8fcb61625745d84p-1L},
+    {0.5, 1e+06, 0x1.37a92c21bd6ecp-4, 0x1.670d95ece8cdbp+1, 0x9.bd49610deb7a01dp-7L, 0xb.386caf67466d8cfp-2L},
+    {-1.5, 10, 0x1.74e386cd949e1p+1, 0x1.3ae81d9920efcp-2, 0xb.a71c366ca4f0f6bp-2L, 0x9.d740ecc9077f96p-5L},
+    {-1.5, 100, 0x1.1ec6d1b30fa53p+8, 0x1.6fd80d3ba4442p+3, 0x8.f6368d987d29812p+5L, 0xb.7ec069dd221ffc8p+0L},
+    {-1.5, 1000, -0x1.34a26e45195efp+14, 0x1.bfb89d9732d16p+13, -0x9.a5137228caf745ep+11L, 0xd.fdc4ecb9968b91cp+10L},
+    {-1.5, 10000, 0x1.1b0d6c8dfb7ep+21, 0x1.d9db5ba1de695p+19, 0x8.d86b646fdbf08d2p+18L, 0xe.cedadd0ef34b311p+16L},
+    {-1.5, 100000, -0x1.c69e1621ba10cp+27, 0x1.1c11e7d28da47p+27, -0xe.34f0b10dd086e17p+24L, 0x8.e08f3e946d2393ap+24L},
+    {-1.5, 1e+06, -0x1.6fe0a3902e12fp+34, 0x1.79f7b0a1cc5ep+32, -0xb.7f051c8170984b4p+31L, 0xb.cfbd850e62f084cp+29L},
+};
+template <class T> void zeta_em_bits() {
+    if constexpr (std::is_same_v<T, float>) { return; } else {
+    constexpr bool ld = std::is_same_v<T, long double>;
+    if constexpr (ld) if (std::numeric_limits<long double>::digits != 64) return;
+#if defined(_LIBCPP_VERSION) && defined(__GLIBC__) && !QTEST_FP_CONTRACT && !QUATERNION_X87_LIBM
+    constexpr bool exact = true;
+#else
+    constexpr bool exact = false;
+#endif
+    const T e = std::numeric_limits<T>::epsilon();
+    double worst = 0;
+    int same = 0;
+    for (const auto& r : zeta_refs) {
+        const quaternion<T> got = quat::riemann_zeta(quaternion<T>(static_cast<T>(r.re), static_cast<T>(r.im), T(), T()));
+        const T wr = ld ? static_cast<T>(r.lre) : static_cast<T>(r.wre), wi = ld ? static_cast<T>(r.lim) : static_cast<T>(r.wim);
+        same += (got.w() == wr && got.x() == wi);
+        const double err = static_cast<double>(abs(got - quaternion<T>(wr, wi, T(), T())) / abs(quaternion<T>(wr, wi, T(), T())) / e);
+        worst = std::max(worst, err);
+        if (exact) qtest::check(got.w() == wr && got.x() == wi, "riemann_zeta bits equal the old ones");
+        else qtest::check(err <= 16, "riemann_zeta within 16 eps of the old values");
+        if (!(err <= 16)) std::fprintf(stderr, "   zeta(%g+%gi): %.3g eps from the old value\n", r.re, r.im, err);
+    }
+    std::printf("  [%s] riemann_zeta, 18 points: %d bit-identical to the old results, worst %.3g eps apart (%s)\n",
+                qtest::current_type, same, worst, exact ? "bits required" : "tolerance 16 eps");
+    }
+}
+}  // namespace
+
+TEST(log_dd_one_exp_accuracy) { FOR_EACH_TYPE(log_dd_accuracy); }
+TEST(riemann_zeta_em_bits) { FOR_EACH_TYPE(zeta_em_bits); }
+
 TEST_MAIN
